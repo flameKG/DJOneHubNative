@@ -41,6 +41,8 @@ var idempotentCLIPaths = map[string]bool{
 	"POST /api/call/answer": true,
 	"POST /api/call/hangup": true,
 	"POST /api/esim/switch": true,
+	"POST /api/agent/audio/start": true,
+	"POST /api/agent/audio/stop":  true,
 }
 
 func (a *app) agentIdempotencyMiddleware(next http.Handler) http.Handler {

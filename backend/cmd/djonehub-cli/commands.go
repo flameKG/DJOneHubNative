@@ -49,6 +49,8 @@ func dispatch(ctx context.Context, options globalOptions, args []string, stdout 
 		return smsCommand(ctx, options, args[1:])
 	case "call":
 		return callCommand(ctx, options, args[1:], stdout)
+	case "agent-audio":
+		return agentAudioCommand(ctx, options, args[1:])
 	case "esim":
 		return esimCommand(ctx, options, args[1:])
 	case "agent":
@@ -417,6 +419,40 @@ func callHangupCommand(ctx context.Context, options globalOptions, args []string
 		return dryRunResult("call.hangup", "call.hangup", map[string]any{}, id), nil
 	}
 	return mutateCommand(ctx, options, "call.hangup", http.MethodPost, "/api/call/hangup", nil, id)
+}
+
+func agentAudioCommand(ctx context.Context, options globalOptions, args []string) (commandResult, *commandError) {
+	if len(args) == 0 {
+		return commandResult{Command: "agent-audio"}, usageError("usage: djonehub agent-audio status|start|stop")
+	}
+	if args[0] == "status" {
+		if len(args) != 1 {
+			return commandResult{Command: "agent-audio.status"}, usageError("agent-audio status does not accept arguments")
+		}
+		return getCommand(ctx, options, "agent-audio.status", "/api/agent/audio/status")
+	}
+	if args[0] != "start" && args[0] != "stop" {
+		return commandResult{Command: "agent-audio"}, usageError("usage: djonehub agent-audio status|start|stop")
+	}
+	name := "agent-audio." + args[0]
+	set := newFlagSet("agent-audio " + args[0])
+	requestID := set.String("request-id", "", "idempotency key")
+	dryRun := set.Bool("dry-run", false, "validate without changing transport state")
+	yes := set.Bool("yes", false, "confirm execution")
+	if err := parseFlagSet(set, args[1:]); err != nil {
+		return commandResult{Command: name}, err
+	}
+	id, idErr := ensureRequestID("audio", *requestID)
+	if idErr != nil {
+		return commandResult{Command: name}, idErr
+	}
+	if *dryRun {
+		return dryRunResult(name, "call.agent_audio", map[string]any{}, id), nil
+	}
+	if !*yes {
+		return commandResult{Command: name, RequestID: id}, confirmationError(args[0]+"ing Agent PCM transport", id)
+	}
+	return mutateCommand(ctx, options, name, http.MethodPost, "/api/agent/audio/"+args[0], nil, id)
 }
 
 func esimCommand(ctx context.Context, options globalOptions, args []string) (commandResult, *commandError) {

@@ -183,6 +183,9 @@ func loadCLIAccessConfig(path string) (cliAccessConfig, error) {
 
 var cliScopeByRoute = map[string]string{
 	"GET /api/agent/capabilities":          "",
+	"GET /api/agent/audio/status":          "call.agent_audio",
+	"POST /api/agent/audio/start":          "call.agent_audio",
+	"POST /api/agent/audio/stop":           "call.agent_audio",
 	"GET /api/health":                      "device.read",
 	"GET /api/status":                      "device.read",
 	"GET /api/sms":                         "sms.read",
@@ -272,6 +275,9 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		{Name: "call.dial", RequiredScope: "call.dial", Mutating: true, Confirmation: true},
 		{Name: "call.answer", RequiredScope: "call.answer", Mutating: true, Confirmation: true},
 		{Name: "call.hangup", RequiredScope: "call.hangup", Mutating: true},
+		{Name: "call.agent_audio.status", RequiredScope: "call.agent_audio"},
+		{Name: "call.agent_audio.start", RequiredScope: "call.agent_audio", Mutating: true, Confirmation: true},
+		{Name: "call.agent_audio.stop", RequiredScope: "call.agent_audio", Mutating: true, Confirmation: true},
 		{Name: "esim.list", RequiredScope: "esim.read"},
 		{Name: "esim.operation", RequiredScope: "esim.read"},
 		{Name: "esim.switch", RequiredScope: "esim.switch", Mutating: true, Confirmation: true},
@@ -290,9 +296,12 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		"scopes":       scopes,
 		"capabilities": definitions,
 		"safety": map[string]any{
-			"idempotency_required":  []string{"sms.send", "call.dial", "call.answer", "call.hangup", "esim.switch"},
+			"idempotency_required":  []string{"sms.send", "call.dial", "call.answer", "call.hangup", "call.agent_audio.start", "call.agent_audio.stop", "esim.switch"},
 			"raw_at_available":      false,
-			"voice_agent_available": false,
+			"agent_pcm_transport_available": a.agentAudioSnapshot().PCMTransportAvailable,
+			"voice_agent_available": a.agentAudioSnapshot().VoiceAgentAvailable,
+			"asr_available":         false,
+			"tts_available":         false,
 		},
 	})
 }

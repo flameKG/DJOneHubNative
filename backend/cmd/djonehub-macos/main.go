@@ -112,6 +112,10 @@ type app struct {
 	// 语音功能（USB 音频）开关
 	voiceEnabled bool
 
+	// Agent PCM 数据平面由原生 App 托管；后端只保存经 App 凭证注册的控制状态。
+	agentAudioMu sync.RWMutex
+	agentAudio   agentAudioState
+
 	// 通话模式：USB 初始化、运行时下载与模块侧语音路由状态。
 	callModeMu        sync.RWMutex
 	callModeRefreshMu sync.Mutex
@@ -807,6 +811,10 @@ func (a *app) markUSBATDetached(reason string) {
 func (a *app) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/agent/capabilities", a.agentCapabilities)
+	mux.HandleFunc("PUT /api/agent/audio/transport", a.agentAudioTransport)
+	mux.HandleFunc("GET /api/agent/audio/status", a.agentAudioStatus)
+	mux.HandleFunc("POST /api/agent/audio/start", a.agentAudioStart)
+	mux.HandleFunc("POST /api/agent/audio/stop", a.agentAudioStop)
 	mux.HandleFunc("GET /api/health", a.health)
 	mux.HandleFunc("GET /api/status", a.status)
 	mux.HandleFunc("GET /api/sms", a.listSMS)

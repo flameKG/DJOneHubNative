@@ -93,6 +93,7 @@ final class BackendProcess: ObservableObject {
             for _ in 0..<50 {
                 if FileManager.default.fileExists(atPath: self.socketPath) {
                     self.state = .running
+                    self.startAgentAudioTransport()
                     return
                 }
                 if !proc.isRunning {
@@ -106,11 +107,52 @@ final class BackendProcess: ObservableObject {
     }
 
     func stop() {
+        AgentAudioBridge.shared.stop()
         if let proc = process, proc.isRunning {
             proc.terminate()
         }
         stdoutTask?.cancel()
         stderrTask?.cancel()
+    }
+
+    private func startAgentAudioTransport() {
+        let bridge = AgentAudioBridge.shared
+        bridge.onStateChange = { state in
+            Task { await Self.reportAgentAudioState(state, socketPath: bridge.socketPath) }
+        }
+        do {
+            try bridge.start()
+        } catch {
+            Task {
+                await Self.reportAgentAudioState(
+                    AgentAudioBridgeState(transportReady: false, clientConnected: false,
+                                          sessionNonce: nil, lastError: error.localizedDescription),
+                    socketPath: bridge.socketPath)
+            }
+        }
+    }
+
+    private struct AgentAudioTransportUpdate: Encodable {
+        let compiled: Bool
+        let transportReady: Bool
+        let moduleIOReady: Bool
+        let socketPath: String
+        let clientConnected: Bool
+        let error: String
+    }
+
+    private struct AgentAudioTransportResponse: Decodable {}
+
+    private static func reportAgentAudioState(_ state: AgentAudioBridgeState, socketPath: String) async {
+        let update = AgentAudioTransportUpdate(
+            compiled: true,
+            transportReady: state.transportReady,
+            moduleIOReady: false,
+            socketPath: socketPath,
+            clientConnected: state.clientConnected,
+            error: state.lastError ?? "")
+        let _: AgentAudioTransportResponse? = try? await APIClient(timeoutInterval: 5).send(
+            "api/agent/audio/transport", method: "PUT", body: update)
     }
 
     private func drain(_ handle: FileHandle, to dest: FileHandle) {

@@ -46,6 +46,10 @@ struct CLIPermission: Identifiable, Hashable {
             detail: "保留为安全退出动作，不额外要求 --yes。",
             systemImage: "phone.down.fill", mutating: true, prerequisite: "call.read"),
         .init(
+            id: "call.agent_audio", title: "Agent PCM 音频",
+            detail: "授权单客户端 8 kHz PCM 数据通道；不包含 ASR/TTS，启动和停止仍需 --yes。",
+            systemImage: "waveform", mutating: true, prerequisite: "call.read"),
+        .init(
             id: "esim.read", title: "读取 eSIM",
             detail: "读取卡片、Profile 与异步操作状态。",
             systemImage: "simcard", mutating: false, prerequisite: nil),
@@ -56,7 +60,7 @@ struct CLIPermission: Identifiable, Hashable {
     ]
 
     static let readOnlyScopes = Set(all.filter { !$0.mutating }.map(\.id))
-    static let communicationScopes = Set(all.map(\.id))
+    static let communicationScopes = Set(all.filter { $0.id != "call.agent_audio" }.map(\.id))
 }
 
 enum CLIPermissionPreset: String {
