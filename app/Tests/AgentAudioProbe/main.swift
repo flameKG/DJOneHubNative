@@ -67,12 +67,15 @@ func testAudioOwnershipMutualExclusion() {
     expect(!AgentAudioOwnership.shared.acquire(.agent), "agent must not overlap human")
     AgentAudioOwnership.shared.release(.human)
     expect(AgentAudioOwnership.shared.acquire(.agent), "agent owner acquire")
+    expect(!AgentAudioOwnership.shared.acquire(.agent), "same owner must not overlap another session")
     expect(!AgentAudioOwnership.shared.acquire(.human), "human must not overlap agent")
     AgentAudioOwnership.shared.release(.agent)
     print("PASS ownership: human and Agent audio bridges are mutually exclusive")
 }
 
 final class FakeModuleIO: AgentModuleAudioIO {
+    var onReady: (() -> Void)?
+    var onUnavailable: (() -> Void)?
     var downlink: (() -> Data)?
     var uplink: ((Data) -> Void)?
     var starts = 0
@@ -81,6 +84,78 @@ final class FakeModuleIO: AgentModuleAudioIO {
         starts += 1; downlink = pullDownlink; uplink = pushUplink
     }
     func stop() { stops += 1; downlink = nil; uplink = nil }
+}
+
+final class ReadyThenFailModuleIO: AgentModuleAudioIO {
+    var onReady: (() -> Void)?
+    var onUnavailable: (() -> Void)?
+    func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
+        onReady?()
+        throw AgentAudioError.socketFailure("second endpoint failed")
+    }
+    func stop() {}
+}
+
+final class BlockingFirstStartModuleIO: AgentModuleAudioIO {
+    var onReady: (() -> Void)?
+    var onUnavailable: (() -> Void)?
+    let firstStartEntered = DispatchSemaphore(value: 0)
+    let releaseFirstStart = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var startCount = 0
+    private var stopCount = 0
+
+    var starts: Int { lock.withLock { startCount } }
+    var stops: Int { lock.withLock { stopCount } }
+
+    func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
+        let number = lock.withLock { () -> Int in
+            startCount += 1
+            return startCount
+        }
+        if number == 1 {
+            firstStartEntered.signal()
+            _ = releaseFirstStart.wait(timeout: .now() + 3)
+        }
+    }
+
+    func stop() { lock.withLock { stopCount += 1 } }
+}
+
+final class BlockingFirstStopModuleIO: AgentModuleAudioIO {
+    var onReady: (() -> Void)?
+    var onUnavailable: (() -> Void)?
+    let firstStopEntered = DispatchSemaphore(value: 0)
+    let releaseFirstStop = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var startCount = 0
+    private var stopCount = 0
+
+    var starts: Int { lock.withLock { startCount } }
+
+    func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
+        lock.withLock { startCount += 1 }
+    }
+
+    func stop() {
+        let number = lock.withLock { () -> Int in
+            stopCount += 1
+            return stopCount
+        }
+        if number == 1 {
+            firstStopEntered.signal()
+            _ = releaseFirstStop.wait(timeout: .now() + 3)
+        }
+    }
+}
+
+func waitUntil(timeout: TimeInterval = 2, _ condition: () -> Bool) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() { return true }
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    return condition()
 }
 
 func connectUnix(_ path: String) throws -> Int32 {
@@ -143,6 +218,11 @@ func testServerHandshakeSessionAndCleanup() throws {
     writeAll(first, try AgentAudioCodec.encode(AgentAudioFrame(type: .hello, sequence: 0, nonce: zeroNonce, payload: Data())))
     let ack = try readFrame(first, parser: &parser)
     expect(ack.type == .ack && ack.nonce != zeroNonce, "HELLO/ACK nonce")
+    Thread.sleep(forTimeInterval: 0.05)
+    expect(!bridge.snapshot().moduleIOReady, "bridge became ready before adapter callback")
+    module.onReady?()
+    Thread.sleep(forTimeInterval: 0.02)
+    expect(bridge.snapshot().moduleIOReady, "bridge did not publish adapter readiness")
 
     let second = try connectUnix(path)
     var secondParser = AgentAudioParser()
@@ -158,15 +238,130 @@ func testServerHandshakeSessionAndCleanup() throws {
     let uplink = try readFrame(first, parser: &parser)
     expect(uplink.type == .uplink && uplink.payload == Data(repeating: 8, count: 320), "uplink")
 
-    let staleNonce = Data(repeating: 9, count: 16)
-    writeAll(first, try AgentAudioCodec.encode(AgentAudioFrame(type: .downlink, sequence: 2, nonce: staleNonce, payload: pcm)))
-    let error = try readFrame(first, parser: &parser)
-    expect(error.type == .error, "stale session not rejected")
+    module.onUnavailable?()
     Thread.sleep(forTimeInterval: 0.05)
-    expect(!bridge.snapshot().clientConnected && module.stops > 0, "disconnect cleanup")
+    expect(!bridge.snapshot().moduleIOReady, "runtime endpoint loss did not revoke readiness")
+    expect(!bridge.snapshot().clientConnected && module.stops > 0, "unavailable cleanup")
+
+    let third = try connectUnix(path)
+    var thirdParser = AgentAudioParser()
+    writeAll(third, try AgentAudioCodec.encode(AgentAudioFrame(type: .hello, sequence: 0,
+        nonce: zeroNonce, payload: Data())))
+    let thirdAck = try readFrame(third, parser: &thirdParser)
+    let staleNonce = Data(repeating: 9, count: AgentAudioProtocol.nonceBytes)
+    writeAll(third, try AgentAudioCodec.encode(AgentAudioFrame(type: .downlink, sequence: 1,
+        nonce: staleNonce, payload: pcm)))
+    let staleError = try readFrame(third, parser: &thirdParser)
+    expect(thirdAck.type == .ack && staleError.type == .error, "stale session not rejected")
+    close(third)
+    Thread.sleep(forTimeInterval: 0.05)
+
     bridge.stop()
     expect(!FileManager.default.fileExists(atPath: path), "socket cleanup")
-    print("PASS server/bridge: 0600, single client, HELLO/ACK nonce, PCM duplex, stale-session rejection and cleanup")
+    print("PASS server/bridge: 0600, single client, HELLO/ACK nonce, PCM duplex, stale-session rejection, runtime-unavailable and cleanup")
+}
+
+func testReadyThenStartFailureDoesNotStick() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("da-fail-\(getpid())")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let bridge = AgentAudioBridge(socketPath: root.appendingPathComponent("pcm.sock").path,
+                                  moduleIO: ReadyThenFailModuleIO())
+    try bridge.start()
+    defer { bridge.stop() }
+    let fd = try connectUnix(bridge.socketPath)
+    defer { close(fd) }
+    var parser = AgentAudioParser()
+    let hello = AgentAudioFrame(type: .hello, sequence: 0,
+                                nonce: Data(count: AgentAudioProtocol.nonceBytes), payload: Data())
+    writeAll(fd, try AgentAudioCodec.encode(hello))
+    _ = try readFrame(fd, parser: &parser)
+    Thread.sleep(forTimeInterval: 0.05)
+    expect(!bridge.snapshot().moduleIOReady, "failed second endpoint left bridge ready")
+    print("PASS bridge readiness is revoked when module start fails")
+}
+
+func testStaleStartCannotResurrectOrStopNewSession() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("da-race-\(getpid())")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let module = BlockingFirstStartModuleIO()
+    let bridge = AgentAudioBridge(socketPath: root.appendingPathComponent("pcm.sock").path, moduleIO: module)
+    try bridge.start()
+    defer { bridge.stop() }
+
+    let zeroNonce = Data(count: AgentAudioProtocol.nonceBytes)
+    let hello = try AgentAudioCodec.encode(AgentAudioFrame(type: .hello, sequence: 0,
+        nonce: zeroNonce, payload: Data()))
+    let first = try connectUnix(bridge.socketPath)
+    var firstParser = AgentAudioParser()
+    writeAll(first, hello)
+    _ = try readFrame(first, parser: &firstParser)
+    expect(module.firstStartEntered.wait(timeout: .now() + 2) == .success, "first module start did not block")
+
+    module.onUnavailable?()
+    let second = try connectUnix(bridge.socketPath)
+    defer { close(second) }
+    var secondParser = AgentAudioParser()
+    writeAll(second, hello)
+    _ = try readFrame(second, parser: &secondParser)
+    module.releaseFirstStart.signal()
+
+    expect(waitUntil { module.starts == 2 && bridge.snapshot().clientConnected },
+           "new session did not start after stale startup invalidation")
+    module.onReady?()
+    expect(waitUntil { bridge.snapshot().moduleIOReady }, "new session did not become ready")
+    let stopsAfterNewStart = module.stops
+    Thread.sleep(forTimeInterval: 0.1)
+    expect(module.stops == stopsAfterNewStart, "stale asynchronous stop tore down the new session")
+    expect(bridge.snapshot().clientConnected && bridge.snapshot().moduleIOReady,
+           "stale startup resurrected or corrupted bridge state")
+    close(first)
+    print("PASS bridge generation serialization blocks stale start/stop races")
+}
+
+func testClientDuringOldStopGetsRetryError() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("da-stop-race-\(getpid())")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let module = BlockingFirstStopModuleIO()
+    let bridge = AgentAudioBridge(socketPath: root.appendingPathComponent("pcm.sock").path, moduleIO: module)
+    try bridge.start()
+    defer {
+        module.releaseFirstStop.signal()
+        bridge.stop()
+    }
+
+    let zeroNonce = Data(count: AgentAudioProtocol.nonceBytes)
+    let hello = try AgentAudioCodec.encode(AgentAudioFrame(type: .hello, sequence: 0,
+        nonce: zeroNonce, payload: Data()))
+    let first = try connectUnix(bridge.socketPath)
+    var firstParser = AgentAudioParser()
+    writeAll(first, hello)
+    _ = try readFrame(first, parser: &firstParser)
+    expect(waitUntil { bridge.snapshot().clientConnected }, "first session did not connect")
+    close(first)
+    expect(module.firstStopEntered.wait(timeout: .now() + 2) == .success, "old session stop did not block")
+
+    let second = try connectUnix(bridge.socketPath)
+    var secondParser = AgentAudioParser()
+    writeAll(second, hello)
+    let secondAck = try readFrame(second, parser: &secondParser)
+    let busy = try readFrame(second, parser: &secondParser)
+    expect(secondAck.type == .ack && busy.type == .error && String(data: busy.payload, encoding: .utf8) == "module_audio_busy_retry",
+           "client racing old stop must receive retryable busy error")
+    close(second)
+
+    module.releaseFirstStop.signal()
+    expect(waitUntil { !bridge.snapshot().clientConnected }, "old stop did not finish")
+    let third = try connectUnix(bridge.socketPath)
+    var thirdParser = AgentAudioParser()
+    writeAll(third, hello)
+    _ = try readFrame(third, parser: &thirdParser)
+    expect(waitUntil { module.starts == 2 && bridge.snapshot().clientConnected },
+           "retry after old stop did not establish a new session")
+    close(third)
+    print("PASS client racing old stop receives retry error and can reconnect")
 }
 
 try testCodecAndIncrementalParser()
@@ -174,4 +369,7 @@ try testLimits()
 testRingBuffer()
 testAudioOwnershipMutualExclusion()
 try testServerHandshakeSessionAndCleanup()
+try testReadyThenStartFailureDoesNotStick()
+try testStaleStartCannotResurrectOrStopNewSession()
+try testClientDuringOldStopGetsRetryError()
 print("PASS Agent PCM format: PCM16LE 8000 Hz mono, 20 ms / 320 bytes")

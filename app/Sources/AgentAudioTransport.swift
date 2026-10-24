@@ -166,6 +166,8 @@ struct PCMFrameRingBuffer {
 }
 
 protocol AgentModuleAudioIO: AnyObject {
+    var onReady: (() -> Void)? { get set }
+    var onUnavailable: (() -> Void)? { get set }
     func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws
     func stop()
 }
@@ -179,7 +181,7 @@ final class AgentAudioOwnership: @unchecked Sendable {
 
     func acquire(_ requested: AgentAudioOwner) -> Bool {
         lock.withLock {
-            guard owner == nil || owner == requested else { return false }
+            guard owner == nil else { return false }
             owner = requested
             return true
         }
@@ -195,6 +197,8 @@ final class AgentAudioOwnership: @unchecked Sendable {
 /// Placeholder used until the CoreAudio UAC adapter is wired on a machine with
 /// the module. The transport is independently usable and testable.
 final class UnavailableAgentModuleAudioIO: AgentModuleAudioIO {
+    var onReady: (() -> Void)?
+    var onUnavailable: (() -> Void)?
     func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
         throw AgentAudioError.socketFailure("Agent CoreAudio module IO is not wired")
     }
@@ -203,6 +207,7 @@ final class UnavailableAgentModuleAudioIO: AgentModuleAudioIO {
 
 struct AgentAudioBridgeState: Equatable {
     var transportReady = false
+    var moduleIOReady = false
     var clientConnected = false
     var sessionNonce: Data?
     var lastError: String?
@@ -213,16 +218,18 @@ final class AgentAudioBridge: @unchecked Sendable {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("DJOneHubNative", isDirectory: true)
         return AgentAudioBridge(socketPath: support.appendingPathComponent("agent-audio.sock").path,
-                                moduleIO: UnavailableAgentModuleAudioIO())
+                                moduleIO: CoreAudioAgentModuleAudioIO())
     }()
 
     let socketPath: String
     var onStateChange: ((AgentAudioBridgeState) -> Void)?
     private let moduleIO: AgentModuleAudioIO
     private let lock = NSLock()
+    private let moduleIOLifecycleLock = NSLock()
     private var state = AgentAudioBridgeState()
     private var downlink = PCMFrameRingBuffer(capacity: 25, overflow: .dropOldest)
     private var server: AgentAudioUnixServer?
+    private var moduleIOGeneration: UInt64 = 0
 
     init(socketPath: String, moduleIO: AgentModuleAudioIO) {
         self.socketPath = socketPath
@@ -233,7 +240,7 @@ final class AgentAudioBridge: @unchecked Sendable {
         let server = AgentAudioUnixServer(path: socketPath)
         server.onAuthenticated = { [weak self] nonce in self?.clientAuthenticated(nonce) }
         server.onFrame = { [weak self] frame in self?.receive(frame) }
-        server.onDisconnect = { [weak self] in self?.disconnected() }
+        server.onDisconnect = { [weak self] nonce in self?.disconnected(nonce: nonce) }
         try server.start()
         lock.withLock {
             self.server = server
@@ -244,43 +251,78 @@ final class AgentAudioBridge: @unchecked Sendable {
     }
 
     func stop() {
-        let current = lock.withLock { () -> AgentAudioUnixServer? in
+        let values = lock.withLock { () -> (AgentAudioUnixServer?, UInt64) in
+            moduleIOGeneration &+= 1
+            let stopGeneration = moduleIOGeneration
             state = AgentAudioBridgeState()
             downlink.removeAll()
             let value = server
             server = nil
-            return value
+            return (value, stopGeneration)
         }
-        moduleIO.stop()
+        stopModuleIO(ifCurrentGeneration: values.1)
         AgentAudioOwnership.shared.release(.agent)
-        current?.stop()
+        values.0?.stop()
         publishState()
     }
 
     func snapshot() -> AgentAudioBridgeState { lock.withLock { state } }
 
     private func clientAuthenticated(_ nonce: Data) {
+        var generation: UInt64 = 0
         do {
             guard AgentAudioOwnership.shared.acquire(.agent) else {
-                throw AgentAudioError.socketFailure("human_audio_bridge_active")
+                server?.failCurrentClient("module_audio_busy_retry")
+                return
             }
-            try moduleIO.start(pullDownlink: { [weak self] in
+            generation = lock.withLock {
+                moduleIOGeneration &+= 1
+                state.moduleIOReady = false
+                state.clientConnected = false
+                state.sessionNonce = nonce
+                return moduleIOGeneration
+            }
+            moduleIO.onReady = { [weak self] in
+                guard let self else { return }
+                let changed = self.lock.withLock { () -> Bool in
+                    guard self.moduleIOGeneration == generation else { return false }
+                    self.state.moduleIOReady = true
+                    return true
+                }
+                if changed { self.publishState() }
+            }
+            moduleIO.onUnavailable = { [weak self] in self?.moduleUnavailable(generation: generation) }
+            try startModuleIO(generation: generation, pullDownlink: { [weak self] in
                 self?.lock.withLock { self?.downlink.popOrSilence() } ?? Data(count: AgentAudioProtocol.pcmFrameBytes)
             }, pushUplink: { [weak self] pcm in
                 guard pcm.count == AgentAudioProtocol.pcmFrameBytes else { return }
                 self?.lock.withLock { self?.server }?.sendUplink(pcm)
             })
-            lock.withLock {
+            let committed = lock.withLock { () -> Bool in
+                guard moduleIOGeneration == generation else { return false }
                 state.clientConnected = true
                 state.sessionNonce = nonce
                 state.lastError = nil
+                return true
             }
+            guard committed else { throw AgentAudioError.disconnected }
             publishState()
         } catch {
-            AgentAudioOwnership.shared.release(.agent)
-            lock.withLock { state.lastError = String(describing: error) }
-            publishState()
-            server?.failCurrentClient("module_io_unavailable")
+            let stopGeneration = lock.withLock { () -> UInt64? in
+                guard moduleIOGeneration == generation else { return nil }
+                moduleIOGeneration &+= 1
+                state.moduleIOReady = false
+                state.clientConnected = false
+                state.sessionNonce = nil
+                state.lastError = String(describing: error)
+                return moduleIOGeneration
+            }
+            if let stopGeneration {
+                stopModuleIO(ifCurrentGeneration: stopGeneration)
+                AgentAudioOwnership.shared.release(.agent)
+                publishState()
+                server?.failCurrentClient("module_io_unavailable")
+            }
         }
     }
 
@@ -295,15 +337,60 @@ final class AgentAudioBridge: @unchecked Sendable {
         }
     }
 
-    private func disconnected() {
-        moduleIO.stop()
-        AgentAudioOwnership.shared.release(.agent)
-        lock.withLock {
+    private func disconnected(nonce: Data?) {
+        let stopGeneration = lock.withLock { () -> UInt64? in
+            guard let nonce, state.sessionNonce == nonce else { return nil }
+            moduleIOGeneration &+= 1
             downlink.removeAll()
+            state.moduleIOReady = false
             state.clientConnected = false
             state.sessionNonce = nil
+            return moduleIOGeneration
         }
+        guard let stopGeneration else { return }
+        stopModuleIO(ifCurrentGeneration: stopGeneration)
+        AgentAudioOwnership.shared.release(.agent)
         publishState()
+    }
+
+    private func moduleUnavailable(generation: UInt64) {
+        let values = lock.withLock { () -> (AgentAudioUnixServer, UInt64)? in
+            guard moduleIOGeneration == generation, let server else { return nil }
+            moduleIOGeneration &+= 1
+            let stopGeneration = moduleIOGeneration
+            downlink.removeAll()
+            state.moduleIOReady = false
+            state.clientConnected = false
+            state.sessionNonce = nil
+            state.lastError = "module_io_unavailable"
+            return (server, stopGeneration)
+        }
+        guard let values else { return }
+        AgentAudioOwnership.shared.release(.agent)
+        publishState()
+        values.0.failCurrentClient("module_io_unavailable")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            self?.stopModuleIO(ifCurrentGeneration: values.1)
+        }
+    }
+
+    private func startModuleIO(generation: UInt64, pullDownlink: @escaping () -> Data,
+                               pushUplink: @escaping (Data) -> Void) throws {
+        moduleIOLifecycleLock.lock()
+        defer { moduleIOLifecycleLock.unlock() }
+        guard lock.withLock({ moduleIOGeneration == generation }) else { throw AgentAudioError.disconnected }
+        try moduleIO.start(pullDownlink: pullDownlink, pushUplink: pushUplink)
+        guard lock.withLock({ moduleIOGeneration == generation }) else {
+            moduleIO.stop()
+            throw AgentAudioError.disconnected
+        }
+    }
+
+    private func stopModuleIO(ifCurrentGeneration generation: UInt64) {
+        moduleIOLifecycleLock.lock()
+        defer { moduleIOLifecycleLock.unlock() }
+        guard lock.withLock({ moduleIOGeneration == generation }) else { return }
+        moduleIO.stop()
     }
 
     private func publishState() {
@@ -316,7 +403,7 @@ final class AgentAudioUnixServer: @unchecked Sendable {
     let path: String
     var onAuthenticated: ((Data) -> Void)?
     var onFrame: ((AgentAudioFrame) -> Void)?
-    var onDisconnect: (() -> Void)?
+    var onDisconnect: ((Data?) -> Void)?
 
     private let stateQueue = DispatchQueue(label: "com.djonehub.agent-audio.server")
     private let writeLock = NSLock()
@@ -428,12 +515,16 @@ final class AgentAudioUnixServer: @unchecked Sendable {
         var parser = AgentAudioParser()
         var bytes = [UInt8](repeating: 0, count: 4096)
         defer {
-            let owned = stateQueue.sync { () -> Bool in
-                guard clientFD == fd else { return false }
+            let disconnected = stateQueue.sync { () -> (owned: Bool, nonce: Data?) in
+                guard clientFD == fd else { return (false, nil) }
+                let nonce = sessionNonce
                 clientFD = -1; sessionNonce = nil
-                return true
+                return (true, nonce)
             }
-            if owned { close(fd); onDisconnect?() }
+            if disconnected.owned {
+                close(fd)
+                onDisconnect?(disconnected.nonce)
+            }
         }
         while stateQueue.sync(execute: { running && clientFD == fd }) {
             let count = Darwin.read(fd, &bytes, bytes.count)

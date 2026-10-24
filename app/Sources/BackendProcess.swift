@@ -147,7 +147,7 @@ final class BackendProcess: ObservableObject {
         let update = AgentAudioTransportUpdate(
             compiled: true,
             transportReady: state.transportReady,
-            moduleIOReady: false,
+            moduleIOReady: state.moduleIOReady,
             socketPath: socketPath,
             clientConnected: state.clientConnected,
             error: state.lastError ?? "")
