@@ -139,6 +139,15 @@ final class BackendProcess: ObservableObject {
         let socketPath: String
         let clientConnected: Bool
         let error: String
+
+        enum CodingKeys: String, CodingKey {
+            case compiled
+            case transportReady = "transport_ready"
+            case moduleIOReady = "module_io_ready"
+            case socketPath = "socket_path"
+            case clientConnected = "client_connected"
+            case error
+        }
     }
 
     private struct AgentAudioTransportResponse: Decodable {}
@@ -151,8 +160,20 @@ final class BackendProcess: ObservableObject {
             socketPath: socketPath,
             clientConnected: state.clientConnected,
             error: state.lastError ?? "")
-        let _: AgentAudioTransportResponse? = try? await APIClient(timeoutInterval: 5).send(
-            "api/agent/audio/transport", method: "PUT", body: update)
+
+        // 后端 socket 文件出现后，HTTP 服务可能还没有完成监听。
+        // 只尝试一次会把启动竞态永久固化为 compiled=false；状态注册必须可重试。
+        for attempt in 0..<10 {
+            do {
+                let _: AgentAudioTransportResponse? = try await APIClient(timeoutInterval: 5).send(
+                    "api/agent/audio/transport", method: "PUT", body: update)
+                return
+            } catch {
+                guard attempt < 9 else { return }
+                let delay = UInt64(100_000_000) * UInt64(attempt + 1)
+                try? await Task.sleep(nanoseconds: delay)
+            }
+        }
     }
 
     private func drain(_ handle: FileHandle, to dest: FileHandle) {
