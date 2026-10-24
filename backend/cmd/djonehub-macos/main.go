@@ -116,6 +116,10 @@ type app struct {
 	agentAudioMu sync.RWMutex
 	agentAudio   agentAudioState
 
+	// 一次性语音验证码接听窗口：仅接听用户明确允许的号码。
+	voiceVerificationMu sync.Mutex
+	voiceVerification   *voiceVerificationWindow
+
 	// 通话模式：USB 初始化、运行时下载与模块侧语音路由状态。
 	callModeMu        sync.RWMutex
 	callModeRefreshMu sync.Mutex
@@ -396,6 +400,7 @@ func serve(instance *app, listen string) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go instance.runVoiceVerificationAutomation(ctx)
 
 	ln, err := listenWith(listen, server)
 	if err != nil {
@@ -841,6 +846,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /api/routing/stop", a.stopRouting)
 	mux.HandleFunc("POST /api/routing/uninstall", a.uninstallRoutingService)
 	mux.HandleFunc("GET /api/call/status", a.callStatus)
+	mux.HandleFunc("GET /api/call/voice-verification", a.voiceVerificationStatus)
+	mux.HandleFunc("POST /api/call/voice-verification/arm", a.voiceVerificationArm)
+	mux.HandleFunc("POST /api/call/voice-verification/disarm", a.voiceVerificationDisarm)
 	mux.HandleFunc("GET /api/calls", a.listCalls)
 	mux.HandleFunc("POST /api/calls/clear", a.clearCalls)
 	mux.HandleFunc("POST /api/calls/delete", a.deleteCall)
