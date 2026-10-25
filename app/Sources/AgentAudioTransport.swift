@@ -168,6 +168,7 @@ struct PCMFrameRingBuffer {
 protocol AgentModuleAudioIO: AnyObject {
     var onReady: (() -> Void)? { get set }
     var onUnavailable: (() -> Void)? { get set }
+    var onCapturePCM: ((Data) -> Void)? { get set }
     func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws
     func stop()
 }
@@ -199,6 +200,7 @@ final class AgentAudioOwnership: @unchecked Sendable {
 final class UnavailableAgentModuleAudioIO: AgentModuleAudioIO {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
     func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
         throw AgentAudioError.socketFailure("Agent CoreAudio module IO is not wired")
     }
@@ -223,6 +225,7 @@ final class AgentAudioBridge: @unchecked Sendable {
 
     let socketPath: String
     var onStateChange: ((AgentAudioBridgeState) -> Void)?
+    var onNativeTranscript: ((String, Bool) -> Void)?
     private let moduleIO: AgentModuleAudioIO
     private let lock = NSLock()
     private let moduleIOLifecycleLock = NSLock()
@@ -230,6 +233,7 @@ final class AgentAudioBridge: @unchecked Sendable {
     private var downlink = PCMFrameRingBuffer(capacity: 25, overflow: .dropOldest)
     private var server: AgentAudioUnixServer?
     private var moduleIOGeneration: UInt64 = 0
+    private var nativeTranscriber: AnyObject?
 
     init(socketPath: String, moduleIO: AgentModuleAudioIO) {
         self.socketPath = socketPath
@@ -292,6 +296,11 @@ final class AgentAudioBridge: @unchecked Sendable {
                 if changed { self.publishState() }
             }
             moduleIO.onUnavailable = { [weak self] in self?.moduleUnavailable(generation: generation) }
+            moduleIO.onCapturePCM = { [weak self] pcm in
+                guard #available(macOS 27.0, *) else { return }
+                (self?.nativeTranscriber as? NativeSpeechTranscriber)?.appendPCM16LE(pcm)
+            }
+            startNativeTranscriber()
             try startModuleIO(generation: generation, pullDownlink: { [weak self] in
                 self?.lock.withLock { self?.downlink.popOrSilence() } ?? Data(count: AgentAudioProtocol.pcmFrameBytes)
             }, pushUplink: { [weak self] pcm in
@@ -391,6 +400,25 @@ final class AgentAudioBridge: @unchecked Sendable {
         defer { moduleIOLifecycleLock.unlock() }
         guard lock.withLock({ moduleIOGeneration == generation }) else { return }
         moduleIO.stop()
+        stopNativeTranscriber()
+    }
+
+    private func startNativeTranscriber() {
+        guard #available(macOS 27.0, *) else { return }
+        let transcriber = NativeSpeechTranscriber { [weak self] text, isFinal in
+            self?.onNativeTranscript?(text, isFinal)
+        }
+        nativeTranscriber = transcriber
+        Task {
+            try? await transcriber.start()
+        }
+    }
+
+    private func stopNativeTranscriber() {
+        guard #available(macOS 27.0, *) else { return }
+        let transcriber = nativeTranscriber as? NativeSpeechTranscriber
+        nativeTranscriber = nil
+        Task { await transcriber?.stop() }
     }
 
     private func publishState() {

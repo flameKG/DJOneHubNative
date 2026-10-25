@@ -278,6 +278,7 @@ enum AgentModuleCoreAudioDiscovery {
 final class CoreAudioAgentModuleAudioIO: AgentModuleAudioIO, @unchecked Sendable {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
 
     private struct Registration {
         let device: AudioDeviceID
@@ -469,9 +470,13 @@ final class CoreAudioAgentModuleAudioIO: AgentModuleAudioIO, @unchecked Sendable
             let emitted = captureAccumulator.append(samples)
             _ = readiness.markCallback(.capture)
             let push = pushUplink
+            let capture = onCapturePCM
             let readyCallback = takeReadyCallbackLocked()
             ioLock.unlock()
-            for frame in emitted { push?(frame) }
+            for frame in emitted {
+                push?(frame)
+                capture?(frame)
+            }
             readyCallback?()
 
         case .playback:

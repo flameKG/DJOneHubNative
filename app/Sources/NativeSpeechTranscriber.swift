@@ -42,6 +42,7 @@ final class NativeSpeechTranscriber {
     private var transcriber: SpeechTranscriber?
     private var task: Task<Void, Never>?
     private var started = false
+    private let inputQueue = DispatchQueue(label: "com.djonehub.native-speech.input", qos: .userInitiated)
 
     init(localeIdentifier: String = "zh-CN", onResult: @escaping ResultHandler) {
         self.locale = Locale(identifier: localeIdentifier)
@@ -105,6 +106,12 @@ final class NativeSpeechTranscriber {
 
     /// 线程安全入口：将一帧或多帧 PCM16LE 转成系统转录输入。
     func appendPCM16LE(_ data: Data) {
+        inputQueue.async { [weak self] in
+            self?.appendPCM16LEOnQueue(data)
+        }
+    }
+
+    private func appendPCM16LEOnQueue(_ data: Data) {
         guard started, let converter else { return }
         guard data.count >= 2, data.count.isMultiple(of: 2) else { return }
         let sampleCount = data.count / 2
