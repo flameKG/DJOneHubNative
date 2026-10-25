@@ -28,6 +28,7 @@
 		86A4EF195190FD8DB8452843 /* AudioBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C06A5E003D640BB7E8549F26 /* AudioBridge.swift */; };
 		8A1B2C3D4E5F60718293A4B5 /* AgentAudioTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1B2C3D4E5F60718293A4B5 /* AgentAudioTransport.swift */; };
 		8A1B2C3D4E5F60718293A4B6 /* AgentModuleCoreAudioIO.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1B2C3D4E5F60718293A4B6 /* AgentModuleCoreAudioIO.swift */; };
+		8A1B2C3D4E5F60718293A4B7 /* NativeSpeechTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A1B2C3D4E5F60718293A4B7 /* NativeSpeechTranscriber.swift */; };
 		940297E0B42B99F40BD46819 /* ESIMStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF5F128388C4D104CFA45E4B /* ESIMStore.swift */; };
 		99224F4A92EAC2935F0AFECD /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4A0F2EAECE7CE7153C43A13C /* Assets.xcassets */; };
 		A122D9632A78D37E4E440DBE /* Ringtone.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B63FD8D7D1B1D51D06D23BD /* Ringtone.swift */; };
@@ -59,6 +60,7 @@
 		8F658F8040ABB05665E2861A /* UnixSocketURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnixSocketURLProtocol.swift; sourceTree = "<group>"; };
 		9A1B2C3D4E5F60718293A4B5 /* AgentAudioTransport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentAudioTransport.swift; sourceTree = "<group>"; };
 		9A1B2C3D4E5F60718293A4B6 /* AgentModuleCoreAudioIO.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentModuleCoreAudioIO.swift; sourceTree = "<group>"; };
+		9A1B2C3D4E5F60718293A4B7 /* NativeSpeechTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativeSpeechTranscriber.swift; sourceTree = "<group>"; };
 		9F1FA2273E18ABDD5B1D1B7C /* DJOneHub.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DJOneHub.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA4E2ADFBEE34D33B207BBA4 /* RoutingModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoutingModels.swift; sourceTree = "<group>"; };
 		AF5F128388C4D104CFA45E4B /* ESIMStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ESIMStore.swift; sourceTree = "<group>"; };
@@ -119,6 +121,7 @@
 				C06A5E003D640BB7E8549F26 /* AudioBridge.swift */,
 				9A1B2C3D4E5F60718293A4B5 /* AgentAudioTransport.swift */,
 				9A1B2C3D4E5F60718293A4B6 /* AgentModuleCoreAudioIO.swift */,
+				9A1B2C3D4E5F60718293A4B7 /* NativeSpeechTranscriber.swift */,
 				C0C9E1750A28B9B4C02C072B /* AutoLaunch.swift */,
 				C425E69F6A5C567C97D76733 /* BackendProcess.swift */,
 				BA57E602C5FB2F698C97DE0B /* CLIIntegrationManager.swift */,
@@ -290,6 +293,7 @@
 				86A4EF195190FD8DB8452843 /* AudioBridge.swift in Sources */,
 				8A1B2C3D4E5F60718293A4B5 /* AgentAudioTransport.swift in Sources */,
 				8A1B2C3D4E5F60718293A4B6 /* AgentModuleCoreAudioIO.swift in Sources */,
+				8A1B2C3D4E5F60718293A4B7 /* NativeSpeechTranscriber.swift in Sources */,
 				D17A5BEAA6B91E0CF4345CB7 /* AutoLaunch.swift in Sources */,
 				DCFA455CA254BA22DCE92D89 /* BackendProcess.swift in Sources */,
 				2C788B2C3DB18A39F719ED9B /* CLIIntegrationManager.swift in Sources */,
