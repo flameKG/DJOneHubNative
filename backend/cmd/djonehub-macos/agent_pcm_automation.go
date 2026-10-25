@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"strings"
+	"time"
 )
 
 type agentPCMRunnerFunc func(context.Context, string, func([]byte)) error
@@ -54,6 +55,7 @@ func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID stri
 	a.agentAudioMu.Lock()
 	a.agentAudio.CaptureActive = true
 	a.agentAudio.CaptureSessionID = sessionID
+	a.agentAudio.CaptureStartedAt = time.Now()
 	a.agentAudio.FramesReceived = 0
 	a.agentAudio.NonzeroFrames = 0
 	a.agentAudio.BytesReceived = 0
@@ -78,8 +80,17 @@ func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID stri
 			captureError = err.Error()
 		}
 		a.agentAudioMu.Lock()
+		if a.agentAudio.CaptureSessionID != "" {
+			a.agentAudio.LastCapture = &captureMetrics{
+				SessionID: a.agentAudio.CaptureSessionID, FramesReceived: a.agentAudio.FramesReceived,
+				NonzeroFrames: a.agentAudio.NonzeroFrames, BytesReceived: a.agentAudio.BytesReceived,
+				PeakSample: a.agentAudio.PeakSample, StartedAt: a.agentAudio.CaptureStartedAt,
+				EndedAt: time.Now(), Error: captureError,
+			}
+		}
 		a.agentAudio.CaptureActive = false
 		a.agentAudio.CaptureSessionID = ""
+		a.agentAudio.CaptureStartedAt = time.Time{}
 		a.agentAudio.FramesReceived = 0
 		a.agentAudio.NonzeroFrames = 0
 		a.agentAudio.BytesReceived = 0
@@ -97,8 +108,17 @@ func (a *app) stopVoiceVerificationAudio() {
 	a.agentPCMCancel = nil
 	a.agentPCMSessionID = ""
 	a.agentAudioMu.Lock()
+	if a.agentAudio.CaptureSessionID != "" {
+		a.agentAudio.LastCapture = &captureMetrics{
+			SessionID: a.agentAudio.CaptureSessionID, FramesReceived: a.agentAudio.FramesReceived,
+			NonzeroFrames: a.agentAudio.NonzeroFrames, BytesReceived: a.agentAudio.BytesReceived,
+			PeakSample: a.agentAudio.PeakSample, StartedAt: a.agentAudio.CaptureStartedAt,
+			EndedAt: time.Now(),
+		}
+	}
 	a.agentAudio.CaptureActive = false
 	a.agentAudio.CaptureSessionID = ""
+	a.agentAudio.CaptureStartedAt = time.Time{}
 	a.agentAudio.FramesReceived = 0
 	a.agentAudio.NonzeroFrames = 0
 	a.agentAudio.BytesReceived = 0

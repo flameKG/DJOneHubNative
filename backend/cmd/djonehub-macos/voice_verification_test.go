@@ -132,8 +132,8 @@ func TestVoiceVerificationRejectsLateFramesAndClearsSessionMetrics(t *testing.T)
 	}
 	instance.stopVoiceVerificationAudio()
 	state := instance.agentAudioSnapshot()
-	if state.CaptureSessionID != "" || state.FramesReceived != 0 || state.NonzeroFrames != 0 || state.BytesReceived != 0 || state.PeakSample != 0 || state.CaptureError != "" {
-		t.Fatalf("capture identity or metrics survived stop: %+v", state)
+	if state.CaptureSessionID != "" || state.FramesReceived != 0 || state.NonzeroFrames != 0 || state.BytesReceived != 0 || state.PeakSample != 0 || state.CaptureError != "" || state.LastCapture == nil || state.LastCapture.SessionID != "session-2" || state.LastCapture.FramesReceived != 1 || state.LastCapture.NonzeroFrames != 1 {
+		t.Fatalf("capture identity or metrics survived stop incorrectly: %+v", state)
 	}
 }
 

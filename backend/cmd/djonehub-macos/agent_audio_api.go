@@ -5,7 +5,19 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+type captureMetrics struct {
+	SessionID      string    `json:"session_id"`
+	FramesReceived uint64    `json:"frames_received"`
+	NonzeroFrames  uint64    `json:"nonzero_frames"`
+	BytesReceived  uint64    `json:"bytes_received"`
+	PeakSample     int       `json:"peak_sample"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at"`
+	Error          string    `json:"error,omitempty"`
+}
 
 type agentAudioFormat struct {
 	Encoding          string `json:"encoding"`
@@ -26,11 +38,13 @@ type agentAudioState struct {
 	ClientConnected       bool             `json:"client_connected"`
 	CaptureActive         bool             `json:"capture_active"`
 	CaptureSessionID      string           `json:"capture_session_id,omitempty"`
+	CaptureStartedAt      time.Time        `json:"-"`
 	FramesReceived        uint64           `json:"frames_received"`
 	NonzeroFrames         uint64           `json:"nonzero_frames"`
 	BytesReceived         uint64           `json:"bytes_received"`
 	PeakSample            int              `json:"peak_sample"`
 	CaptureError          string           `json:"capture_error,omitempty"`
+	LastCapture           *captureMetrics  `json:"last_capture,omitempty"`
 	ASRAvailable          bool             `json:"asr_available"`
 	TTSAvailable          bool             `json:"tts_available"`
 	Format                agentAudioFormat `json:"format"`
