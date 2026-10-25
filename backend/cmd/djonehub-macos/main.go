@@ -112,9 +112,14 @@ type app struct {
 	// 语音功能（USB 音频）开关
 	voiceEnabled bool
 
-	// Agent PCM 数据平面由原生 App 托管；后端只保存经 App 凭证注册的控制状态。
-	agentAudioMu sync.RWMutex
-	agentAudio   agentAudioState
+	// Agent PCM 数据平面由原生 App 托管；后端保存传输状态，并在一次性验证码通话中作为受控客户端采集下行 PCM。
+	agentAudioMu       sync.RWMutex
+	agentAudio         agentAudioState
+	agentPCMMu         sync.Mutex
+	agentPCMCancel     context.CancelFunc
+	agentPCMSessionID  string
+	agentPCMGeneration uint64
+	agentPCMRunner     agentPCMRunnerFunc
 
 	// 一次性语音验证码接听窗口：仅接听用户明确允许的号码。
 	voiceVerificationMu sync.Mutex

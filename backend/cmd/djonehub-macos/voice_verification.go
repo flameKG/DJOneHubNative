@@ -8,16 +8,18 @@ import (
 )
 
 type voiceVerificationWindow struct {
-	Active         bool      `json:"active"`
-	ExpiresAt      time.Time `json:"expires_at,omitempty"`
-	AllowedNumbers []string  `json:"allowed_numbers"`
-	Answered       bool      `json:"answered"`
-	SessionID      string    `json:"session_id,omitempty"`
-	Consumed       bool      `json:"consumed"`
-	LastError      string    `json:"last_error,omitempty"`
+	Active          bool      `json:"active"`
+	ExpiresAt       time.Time `json:"expires_at,omitempty"`
+	AllowedNumbers  []string  `json:"allowed_numbers"`
+	Answered        bool      `json:"answered"`
+	SessionID       string    `json:"session_id,omitempty"`
+	Consumed        bool      `json:"consumed"`
+	AudioAuthorized bool      `json:"audio_authorized"`
+	LastError       string    `json:"last_error,omitempty"`
 }
 
 func (a *app) armVoiceVerification(duration time.Duration, allowed []string) voiceVerificationWindow {
+	a.stopVoiceVerificationAudio()
 	now := time.Now()
 	window := voiceVerificationWindow{
 		Active:         true,
@@ -48,8 +50,10 @@ func (a *app) disarmVoiceVerification() {
 	a.voiceVerificationMu.Lock()
 	if a.voiceVerification != nil {
 		a.voiceVerification.Active = false
+		a.voiceVerification.AudioAuthorized = false
 	}
 	a.voiceVerificationMu.Unlock()
+	a.stopVoiceVerificationAudio()
 }
 
 func (a *app) updateVoiceVerification(update func(*voiceVerificationWindow)) {
@@ -77,16 +81,18 @@ func (a *app) voiceVerificationNumberAllowed(number string) bool {
 func (a *app) runVoiceVerificationAutomation(ctx context.Context) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	defer a.stopVoiceVerificationAudio()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			state := a.currentCallState()
+			a.reconcileVoiceVerificationAudio(ctx, state)
 			window := a.voiceVerificationSnapshot()
 			if !window.Active {
 				continue
 			}
-			state := a.currentCallState()
 			if state.State != "incoming" || !a.voiceVerificationNumberAllowed(state.Number) {
 				continue
 			}
@@ -100,6 +106,7 @@ func (a *app) runVoiceVerificationAutomation(ctx context.Context) {
 				current.Active = false
 				current.Answered = true
 				current.Consumed = true
+				current.AudioAuthorized = true
 				current.SessionID = state.SessionID
 				current.LastError = ""
 			})

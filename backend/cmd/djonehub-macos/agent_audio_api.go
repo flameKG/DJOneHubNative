@@ -16,18 +16,25 @@ type agentAudioFormat struct {
 }
 
 type agentAudioState struct {
-	Compiled            bool             `json:"compiled"`
-	TransportReady      bool             `json:"transport_ready"`
-	ModuleIOReady       bool             `json:"module_io_ready"`
-	PCMTransportAvailable bool           `json:"pcm_transport_available"`
-	VoiceAgentAvailable bool             `json:"voice_agent_available"`
-	Active              bool             `json:"active"`
-	SocketPath          string           `json:"socket_path,omitempty"`
-	ClientConnected     bool             `json:"client_connected"`
-	ASRAvailable        bool             `json:"asr_available"`
-	TTSAvailable        bool             `json:"tts_available"`
-	Format              agentAudioFormat `json:"format"`
-	Error               string           `json:"error,omitempty"`
+	Compiled              bool             `json:"compiled"`
+	TransportReady        bool             `json:"transport_ready"`
+	ModuleIOReady         bool             `json:"module_io_ready"`
+	PCMTransportAvailable bool             `json:"pcm_transport_available"`
+	VoiceAgentAvailable   bool             `json:"voice_agent_available"`
+	Active                bool             `json:"active"`
+	SocketPath            string           `json:"socket_path,omitempty"`
+	ClientConnected       bool             `json:"client_connected"`
+	CaptureActive         bool             `json:"capture_active"`
+	CaptureSessionID      string           `json:"capture_session_id,omitempty"`
+	FramesReceived        uint64           `json:"frames_received"`
+	NonzeroFrames         uint64           `json:"nonzero_frames"`
+	BytesReceived         uint64           `json:"bytes_received"`
+	PeakSample            int              `json:"peak_sample"`
+	CaptureError          string           `json:"capture_error,omitempty"`
+	ASRAvailable          bool             `json:"asr_available"`
+	TTSAvailable          bool             `json:"tts_available"`
+	Format                agentAudioFormat `json:"format"`
+	Error                 string           `json:"error,omitempty"`
 }
 
 type agentAudioTransportUpdate struct {
@@ -80,13 +87,19 @@ func (a *app) agentAudioTransport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.agentAudioMu.Lock()
-	active := a.agentAudio.Active
-	a.agentAudio = agentAudioState{
-		Compiled: update.Compiled, TransportReady: update.TransportReady, ModuleIOReady: update.ModuleIOReady,
-		SocketPath: update.SocketPath, ClientConnected: update.ClientConnected,
-		Active: active && update.Compiled && update.TransportReady && update.ModuleIOReady, Error: strings.TrimSpace(update.Error),
-	}
+	previousSocket := a.agentAudio.SocketPath
+	previousTransportReady := a.agentAudio.TransportReady
+	a.agentAudio.Compiled = update.Compiled
+	a.agentAudio.TransportReady = update.TransportReady
+	a.agentAudio.ModuleIOReady = update.ModuleIOReady
+	a.agentAudio.SocketPath = update.SocketPath
+	a.agentAudio.ClientConnected = update.ClientConnected
+	a.agentAudio.Active = a.agentAudio.Active && update.Compiled && update.TransportReady && update.ModuleIOReady
+	a.agentAudio.Error = strings.TrimSpace(update.Error)
 	a.agentAudioMu.Unlock()
+	if previousTransportReady && (!update.Compiled || !update.TransportReady || previousSocket != update.SocketPath) {
+		a.stopVoiceVerificationAudio()
+	}
 	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
 }
 
@@ -107,6 +120,10 @@ func (a *app) agentAudioStart(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) agentAudioStop(w http.ResponseWriter, _ *http.Request) {
+	a.stopVoiceVerificationAudio()
+	a.updateVoiceVerification(func(window *voiceVerificationWindow) {
+		window.AudioAuthorized = false
+	})
 	a.agentAudioMu.Lock()
 	a.agentAudio.Active = false
 	a.agentAudioMu.Unlock()

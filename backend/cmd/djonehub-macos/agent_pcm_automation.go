@@ -1,0 +1,148 @@
+package main
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"strings"
+)
+
+type agentPCMRunnerFunc func(context.Context, string, func([]byte)) error
+
+func (a *app) reconcileVoiceVerificationAudio(ctx context.Context, call callStateInfo) {
+	window := a.voiceVerificationSnapshot()
+	authorized := call.State == "active" && call.Active && window.Answered && window.Consumed && window.AudioAuthorized &&
+		window.SessionID != "" && call.SessionID == window.SessionID
+	if authorized {
+		a.startVoiceVerificationAudio(ctx, call.SessionID)
+		return
+	}
+	// Fail closed: any transition away from the exact authorized active session
+	// immediately revokes capture, including held/unknown/replaced calls.
+	a.stopVoiceVerificationAudio()
+}
+
+func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID string) {
+	transport := a.agentAudioSnapshot()
+	if !transport.PCMTransportAvailable || strings.TrimSpace(transport.SocketPath) == "" {
+		a.stopVoiceVerificationAudio()
+		a.agentAudioMu.Lock()
+		a.agentAudio.CaptureError = "agent_pcm_transport_unavailable"
+		a.agentAudioMu.Unlock()
+		return
+	}
+
+	a.agentPCMMu.Lock()
+	if a.agentPCMCancel != nil && a.agentPCMSessionID == sessionID {
+		a.agentPCMMu.Unlock()
+		return
+	}
+	if a.agentPCMCancel != nil {
+		a.agentPCMCancel()
+	}
+	a.agentPCMGeneration++
+	generation := a.agentPCMGeneration
+	ctx, cancel := context.WithCancel(parent)
+	a.agentPCMCancel = cancel
+	a.agentPCMSessionID = sessionID
+	runner := a.agentPCMRunner
+	if runner == nil {
+		runner = runAgentPCMClient
+	}
+	// Commit the runtime state while holding the same lifecycle lock that
+	// stop/completion use, so an old start cannot resurrect capture after stop.
+	a.agentAudioMu.Lock()
+	a.agentAudio.CaptureActive = true
+	a.agentAudio.CaptureSessionID = sessionID
+	a.agentAudio.FramesReceived = 0
+	a.agentAudio.NonzeroFrames = 0
+	a.agentAudio.BytesReceived = 0
+	a.agentAudio.PeakSample = 0
+	a.agentAudio.CaptureError = ""
+	a.agentAudioMu.Unlock()
+	a.agentPCMMu.Unlock()
+
+	go func() {
+		err := runner(ctx, transport.SocketPath, func(frame []byte) {
+			a.recordAgentPCMFrame(generation, frame)
+		})
+		a.agentPCMMu.Lock()
+		if a.agentPCMGeneration != generation {
+			a.agentPCMMu.Unlock()
+			return
+		}
+		a.agentPCMCancel = nil
+		a.agentPCMSessionID = ""
+		captureError := ""
+		if err != nil && !errors.Is(err, context.Canceled) {
+			captureError = err.Error()
+		}
+		a.agentAudioMu.Lock()
+		a.agentAudio.CaptureActive = false
+		a.agentAudio.CaptureSessionID = ""
+		a.agentAudio.FramesReceived = 0
+		a.agentAudio.NonzeroFrames = 0
+		a.agentAudio.BytesReceived = 0
+		a.agentAudio.PeakSample = 0
+		a.agentAudio.CaptureError = captureError
+		a.agentAudioMu.Unlock()
+		a.agentPCMMu.Unlock()
+	}()
+}
+
+func (a *app) stopVoiceVerificationAudio() {
+	a.agentPCMMu.Lock()
+	a.agentPCMGeneration++
+	cancel := a.agentPCMCancel
+	a.agentPCMCancel = nil
+	a.agentPCMSessionID = ""
+	a.agentAudioMu.Lock()
+	a.agentAudio.CaptureActive = false
+	a.agentAudio.CaptureSessionID = ""
+	a.agentAudio.FramesReceived = 0
+	a.agentAudio.NonzeroFrames = 0
+	a.agentAudio.BytesReceived = 0
+	a.agentAudio.PeakSample = 0
+	a.agentAudio.CaptureError = ""
+	a.agentAudioMu.Unlock()
+	a.agentPCMMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (a *app) recordAgentPCMFrame(generation uint64, frame []byte) {
+	if len(frame) != agentPCMFrameBytes {
+		return
+	}
+	a.agentPCMMu.Lock()
+	defer a.agentPCMMu.Unlock()
+	if a.agentPCMGeneration != generation || a.agentPCMCancel == nil {
+		return
+	}
+	nonzero := false
+	peak := 0
+	for offset := 0; offset+1 < len(frame); offset += 2 {
+		sample := int(int16(binary.LittleEndian.Uint16(frame[offset : offset+2])))
+		if sample != 0 {
+			nonzero = true
+		}
+		absolute := sample
+		if absolute < 0 {
+			absolute = -absolute
+		}
+		if absolute > peak {
+			peak = absolute
+		}
+	}
+	a.agentAudioMu.Lock()
+	a.agentAudio.FramesReceived++
+	a.agentAudio.BytesReceived += uint64(len(frame))
+	if nonzero {
+		a.agentAudio.NonzeroFrames++
+	}
+	if peak > a.agentAudio.PeakSample {
+		a.agentAudio.PeakSample = peak
+	}
+	a.agentAudioMu.Unlock()
+}

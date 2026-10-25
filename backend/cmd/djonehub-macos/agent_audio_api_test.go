@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestAgentAudioUnavailableUntilCompiledTransportIsReady(t *testing.T) {
@@ -90,6 +92,29 @@ func TestAgentAudioRejectsStartWhenTransportNotReady(t *testing.T) {
 	}
 }
 
+func TestAgentAudioTransportRevocationStopsCapture(t *testing.T) {
+	started := make(chan struct{}, 1)
+	stopped := make(chan struct{}, 1)
+	instance := &app{}
+	instance.agentAudio = agentAudioState{Compiled: true, TransportReady: true, SocketPath: "/private/tmp/agent.sock"}
+	instance.agentPCMRunner = func(ctx context.Context, _ string, _ func([]byte)) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		stopped <- struct{}{}
+		return ctx.Err()
+	}
+	instance.startVoiceVerificationAudio(context.Background(), "session-1")
+	<-started
+	request := httptest.NewRequest(http.MethodPut, "/api/agent/audio/transport", bytes.NewBufferString(`{"compiled":false,"transport_ready":false,"module_io_ready":false,"socket_path":""}`))
+	request = request.WithContext(contextWithPrincipal(request, requestPrincipal{Kind: "app"}))
+	response := httptest.NewRecorder()
+	instance.agentAudioTransport(response, request)
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("capture remained active after transport revocation")
+	}
+}
 func TestAgentAudioRoutesRequireDedicatedScope(t *testing.T) {
 	for _, route := range []string{"GET /api/agent/audio/status", "POST /api/agent/audio/start", "POST /api/agent/audio/stop"} {
 		parts := bytes.SplitN([]byte(route), []byte(" "), 2)
