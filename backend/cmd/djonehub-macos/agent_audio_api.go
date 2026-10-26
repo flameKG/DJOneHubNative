@@ -8,15 +8,21 @@ import (
 	"time"
 )
 
+const verificationResultRetention = 5 * time.Minute
+
 type captureMetrics struct {
-	SessionID      string    `json:"session_id"`
-	FramesReceived uint64    `json:"frames_received"`
-	NonzeroFrames  uint64    `json:"nonzero_frames"`
-	BytesReceived  uint64    `json:"bytes_received"`
-	PeakSample     int       `json:"peak_sample"`
-	StartedAt      time.Time `json:"started_at"`
-	EndedAt        time.Time `json:"ended_at"`
-	Error          string    `json:"error,omitempty"`
+	SessionID        string    `json:"session_id"`
+	FramesReceived   uint64    `json:"frames_received"`
+	NonzeroFrames    uint64    `json:"nonzero_frames"`
+	BytesReceived    uint64    `json:"bytes_received"`
+	PeakSample       int       `json:"peak_sample"`
+	StartedAt        time.Time `json:"started_at"`
+	EndedAt          time.Time `json:"ended_at"`
+	Error            string    `json:"error,omitempty"`
+	Transcript       string    `json:"transcript,omitempty"`
+	TranscriptFinal  bool      `json:"transcript_final"`
+	VerificationCode string    `json:"verification_code,omitempty"`
+	ResultExpiresAt  time.Time `json:"result_expires_at,omitempty"`
 }
 
 type agentAudioFormat struct {
@@ -78,14 +84,59 @@ func fixedAgentAudioFormat() agentAudioFormat {
 	}
 }
 
+func clearCaptureSensitiveResult(result *captureMetrics) {
+	if result == nil {
+		return
+	}
+	result.Transcript = ""
+	result.TranscriptFinal = false
+	result.VerificationCode = ""
+	result.ResultExpiresAt = time.Time{}
+}
+
+// setLastCaptureLocked replaces the completed summary and independently erases
+// sensitive transcript data at expiry even when no status endpoint is read.
+// agentAudioMu must be held by the caller.
+func (a *app) setLastCaptureLocked(result *captureMetrics, retention time.Duration) {
+	if a.agentAudioResultExpiryTimer != nil {
+		a.agentAudioResultExpiryTimer.Stop()
+		a.agentAudioResultExpiryTimer = nil
+	}
+	a.agentAudio.LastCapture = result
+	if result == nil || (strings.TrimSpace(result.Transcript) == "" && strings.TrimSpace(result.VerificationCode) == "") {
+		return
+	}
+	if retention < 0 {
+		retention = 0
+	}
+	expiresAt := time.Now().Add(retention)
+	result.ResultExpiresAt = expiresAt
+	a.agentAudioResultExpiryTimer = time.AfterFunc(retention, func() {
+		a.agentAudioMu.Lock()
+		defer a.agentAudioMu.Unlock()
+		if a.agentAudio.LastCapture == result && result.ResultExpiresAt.Equal(expiresAt) {
+			clearCaptureSensitiveResult(result)
+			a.agentAudioResultExpiryTimer = nil
+		}
+	})
+}
+
 func (a *app) agentAudioSnapshot() agentAudioState {
-	a.agentAudioMu.RLock()
+	a.agentAudioMu.Lock()
+	if last := a.agentAudio.LastCapture; last != nil && !last.ResultExpiresAt.IsZero() && time.Now().After(last.ResultExpiresAt) {
+		clearCaptureSensitiveResult(last)
+	}
 	state := a.agentAudio
-	a.agentAudioMu.RUnlock()
+	if state.LastCapture != nil {
+		last := *state.LastCapture
+		state.LastCapture = &last
+	}
+	a.agentAudioMu.Unlock()
 	state.Format = fixedAgentAudioFormat()
 	state.PCMTransportAvailable = state.Compiled && state.TransportReady && strings.TrimSpace(state.SocketPath) != ""
 	state.VoiceAgentAvailable = state.PCMTransportAvailable && state.ModuleIOReady
-	state.ASRAvailable = false
+	state.ASRAvailable = strings.TrimSpace(state.Transcript) != "" ||
+		(state.LastCapture != nil && strings.TrimSpace(state.LastCapture.Transcript) != "")
 	state.TTSAvailable = false
 	if !state.VoiceAgentAvailable {
 		state.Active = false
@@ -142,14 +193,20 @@ func (a *app) agentAudioTranscript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	update.Text = strings.TrimSpace(update.Text)
+	update.SessionID = strings.TrimSpace(update.SessionID)
 	if len(update.Text) > 4000 {
 		writeCodedError(w, http.StatusBadRequest, "agent_audio_transcript_too_large", "原生转录结果过长", false)
 		return
 	}
 	a.agentAudioMu.Lock()
+	if update.SessionID == "" || update.SessionID != a.agentAudio.CaptureSessionID {
+		a.agentAudioMu.Unlock()
+		writeCodedError(w, http.StatusConflict, "stale_agent_audio_transcript", "转录结果不属于当前采集会话", false)
+		return
+	}
 	a.agentAudio.Transcript = update.Text
 	a.agentAudio.TranscriptFinal = update.Final
-	a.agentAudio.TranscriptSessionID = strings.TrimSpace(update.SessionID)
+	a.agentAudio.TranscriptSessionID = update.SessionID
 	a.agentAudio.VerificationCode = extractVerificationDigits(update.Text)
 	a.agentAudio.TranscriptUpdatedAt = time.Now()
 	a.agentAudioMu.Unlock()

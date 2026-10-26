@@ -10,12 +10,52 @@ import (
 
 type agentPCMRunnerFunc func(context.Context, string, func([]byte)) error
 
+var (
+	errModuleVoiceRecoveryInProgress = errors.New("模块语音路由正在执行单次自动恢复")
+	errModuleVoiceRecoveryExhausted  = errors.New("模块音频单次自动恢复已用尽，需要授权重启 CoreAudio")
+)
+
+func (a *app) completedCaptureLocked(captureError string, endedAt time.Time) *captureMetrics {
+	if a.agentAudio.CaptureSessionID == "" {
+		return nil
+	}
+	result := &captureMetrics{
+		SessionID: a.agentAudio.CaptureSessionID, FramesReceived: a.agentAudio.FramesReceived,
+		NonzeroFrames: a.agentAudio.NonzeroFrames, BytesReceived: a.agentAudio.BytesReceived,
+		PeakSample: a.agentAudio.PeakSample, StartedAt: a.agentAudio.CaptureStartedAt,
+		EndedAt: endedAt, Error: captureError,
+	}
+	if a.agentAudio.TranscriptSessionID == result.SessionID {
+		result.Transcript = a.agentAudio.Transcript
+		result.TranscriptFinal = a.agentAudio.TranscriptFinal
+		result.VerificationCode = a.agentAudio.VerificationCode
+	}
+	return result
+}
+
+func (a *app) clearCurrentTranscriptLocked() {
+	a.agentAudio.Transcript = ""
+	a.agentAudio.TranscriptFinal = false
+	a.agentAudio.TranscriptSessionID = ""
+	a.agentAudio.VerificationCode = ""
+	a.agentAudio.TranscriptUpdatedAt = time.Time{}
+}
+
 func (a *app) reconcileVoiceVerificationAudio(ctx context.Context, call callStateInfo) {
 	window := a.voiceVerificationSnapshot()
 	authorized := call.State == "active" && call.Active && window.Answered && window.Consumed && window.AudioAuthorized &&
 		window.SessionID != "" && call.SessionID == window.SessionID
 	if authorized {
 		if err := a.ensureModuleVoiceRoute(call.SessionID); err != nil {
+			if errors.Is(err, errModuleVoiceRecoveryInProgress) {
+				return
+			}
+			if errors.Is(err, errModuleVoiceRecoveryExhausted) {
+				a.agentAudioMu.Lock()
+				a.agentAudio.CaptureError = err.Error()
+				a.agentAudioMu.Unlock()
+				return
+			}
 			a.stopVoiceVerificationAudio()
 			a.agentAudioMu.Lock()
 			a.agentAudio.CaptureError = "模块语音路由启动失败：" + err.Error()
@@ -36,6 +76,14 @@ func (a *app) ensureModuleVoiceRoute(sessionID string) error {
 		return nil
 	}
 	a.moduleVoiceMu.Lock()
+	if a.moduleVoiceRecoveryInProgress {
+		a.moduleVoiceMu.Unlock()
+		return errModuleVoiceRecoveryInProgress
+	}
+	if a.moduleVoiceRecoveryExhausted == sessionID {
+		a.moduleVoiceMu.Unlock()
+		return errModuleVoiceRecoveryExhausted
+	}
 	if a.moduleVoiceRoute {
 		a.moduleVoiceMu.Unlock()
 		return nil
@@ -81,6 +129,15 @@ func (a *app) stopModuleVoiceRouteForCall() {
 		return
 	}
 	a.moduleVoiceMu.Lock()
+	a.moduleVoiceRecoveryGeneration++
+	a.moduleVoiceRecoverySession = ""
+	a.moduleVoiceRecoveryExhausted = ""
+	if a.moduleVoiceRecoveryInProgress {
+		a.moduleVoiceRouteAttemptedSession = ""
+		a.moduleVoiceRouteLastError = ""
+		a.moduleVoiceMu.Unlock()
+		return
+	}
 	active := a.moduleVoiceRoute
 	stopper := a.moduleVoiceRouteStop
 	a.moduleVoiceRouteAttemptedSession = ""
@@ -103,6 +160,76 @@ func (a *app) stopModuleVoiceRouteForCall() {
 	a.moduleVoiceMu.Lock()
 	a.moduleVoiceRoute = false
 	a.moduleVoiceMu.Unlock()
+}
+
+func isRecoverableModuleIOError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "module_io_unavailable") ||
+		strings.Contains(message, "coreaudio device start failed") ||
+		strings.Contains(message, "0x10004003")
+}
+
+func (a *app) reserveModuleVoiceRecovery(sessionID string, runErr error) (uint64, bool) {
+	if !a.moduleVoiceAutoStart || !isRecoverableModuleIOError(runErr) {
+		return 0, false
+	}
+	a.moduleVoiceMu.Lock()
+	defer a.moduleVoiceMu.Unlock()
+	if a.moduleVoiceRecoverySession == sessionID || a.moduleVoiceRecoveryInProgress {
+		return 0, false
+	}
+	a.moduleVoiceRecoveryGeneration++
+	generation := a.moduleVoiceRecoveryGeneration
+	a.moduleVoiceRecoverySession = sessionID
+	a.moduleVoiceRecoveryInProgress = true
+	a.moduleVoiceRecoveryActive = generation
+	return generation, true
+}
+
+func (a *app) completeReservedModuleVoiceRecovery(sessionID string, generation uint64) bool {
+	a.moduleVoiceMu.Lock()
+	active := a.moduleVoiceRoute
+	stopper := a.moduleVoiceRouteStop
+	a.moduleVoiceMu.Unlock()
+
+	var recoveryErr error
+	if active {
+		if stopper == nil {
+			stopper = func(directory string) error { return a.stopModuleVoiceRoute(directory) }
+		}
+		recoveryErr = stopper(a.runtimeDirectory())
+	}
+
+	a.moduleVoiceMu.Lock()
+	ownsRecovery := a.moduleVoiceRecoveryInProgress && a.moduleVoiceRecoveryActive == generation
+	validRecovery := ownsRecovery && a.moduleVoiceRecoveryGeneration == generation && a.moduleVoiceRecoverySession == sessionID
+	if recoveryErr == nil && ownsRecovery {
+		// A replacement route cannot start while recovery is in progress, so the
+		// route stopped by this owner is still the old route even if invalidated.
+		a.moduleVoiceRoute = false
+	}
+	if recoveryErr == nil && validRecovery {
+		a.moduleVoiceRouteAttemptedSession = ""
+		a.moduleVoiceRouteLastError = ""
+	}
+	if ownsRecovery {
+		a.moduleVoiceRecoveryInProgress = false
+		a.moduleVoiceRecoveryActive = 0
+	}
+	a.moduleVoiceMu.Unlock()
+
+	if recoveryErr != nil && validRecovery {
+		a.moduleVoiceMu.Lock()
+		a.moduleVoiceRecoveryExhausted = sessionID
+		a.moduleVoiceMu.Unlock()
+		a.agentAudioMu.Lock()
+		a.agentAudio.CaptureError = "模块音频自动恢复失败，需要授权重启 CoreAudio：" + recoveryErr.Error()
+		a.agentAudioMu.Unlock()
+	}
+	return recoveryErr == nil
 }
 
 func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID string) {
@@ -135,6 +262,9 @@ func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID stri
 	// Commit the runtime state while holding the same lifecycle lock that
 	// stop/completion use, so an old start cannot resurrect capture after stop.
 	a.agentAudioMu.Lock()
+	if a.agentAudio.CaptureSessionID != sessionID {
+		a.clearCurrentTranscriptLocked()
+	}
 	a.agentAudio.CaptureActive = true
 	a.agentAudio.CaptureSessionID = sessionID
 	a.agentAudio.CaptureStartedAt = time.Now()
@@ -161,14 +291,10 @@ func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID stri
 		if err != nil && !errors.Is(err, context.Canceled) {
 			captureError = err.Error()
 		}
+		recoveryGeneration, recoveryReserved := a.reserveModuleVoiceRecovery(sessionID, err)
 		a.agentAudioMu.Lock()
-		if a.agentAudio.CaptureSessionID != "" {
-			a.agentAudio.LastCapture = &captureMetrics{
-				SessionID: a.agentAudio.CaptureSessionID, FramesReceived: a.agentAudio.FramesReceived,
-				NonzeroFrames: a.agentAudio.NonzeroFrames, BytesReceived: a.agentAudio.BytesReceived,
-				PeakSample: a.agentAudio.PeakSample, StartedAt: a.agentAudio.CaptureStartedAt,
-				EndedAt: time.Now(), Error: captureError,
-			}
+		if completed := a.completedCaptureLocked(captureError, time.Now()); completed != nil {
+			a.setLastCaptureLocked(completed, verificationResultRetention)
 		}
 		a.agentAudio.CaptureActive = false
 		a.agentAudio.CaptureSessionID = ""
@@ -178,8 +304,19 @@ func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID stri
 		a.agentAudio.BytesReceived = 0
 		a.agentAudio.PeakSample = 0
 		a.agentAudio.CaptureError = captureError
+		a.clearCurrentTranscriptLocked()
 		a.agentAudioMu.Unlock()
 		a.agentPCMMu.Unlock()
+		if recoveryReserved {
+			a.completeReservedModuleVoiceRecovery(sessionID, recoveryGeneration)
+		} else if err != nil && !errors.Is(err, context.Canceled) && isRecoverableModuleIOError(err) {
+			a.moduleVoiceMu.Lock()
+			a.moduleVoiceRecoveryExhausted = sessionID
+			a.moduleVoiceMu.Unlock()
+			a.agentAudioMu.Lock()
+			a.agentAudio.CaptureError = errModuleVoiceRecoveryExhausted.Error()
+			a.agentAudioMu.Unlock()
+		}
 	}()
 }
 
@@ -190,13 +327,8 @@ func (a *app) stopVoiceVerificationAudio() {
 	a.agentPCMCancel = nil
 	a.agentPCMSessionID = ""
 	a.agentAudioMu.Lock()
-	if a.agentAudio.CaptureSessionID != "" {
-		a.agentAudio.LastCapture = &captureMetrics{
-			SessionID: a.agentAudio.CaptureSessionID, FramesReceived: a.agentAudio.FramesReceived,
-			NonzeroFrames: a.agentAudio.NonzeroFrames, BytesReceived: a.agentAudio.BytesReceived,
-			PeakSample: a.agentAudio.PeakSample, StartedAt: a.agentAudio.CaptureStartedAt,
-			EndedAt: time.Now(),
-		}
+	if completed := a.completedCaptureLocked("", time.Now()); completed != nil {
+		a.setLastCaptureLocked(completed, verificationResultRetention)
 	}
 	a.agentAudio.CaptureActive = false
 	a.agentAudio.CaptureSessionID = ""
@@ -206,6 +338,7 @@ func (a *app) stopVoiceVerificationAudio() {
 	a.agentAudio.BytesReceived = 0
 	a.agentAudio.PeakSample = 0
 	a.agentAudio.CaptureError = ""
+	a.clearCurrentTranscriptLocked()
 	a.agentAudioMu.Unlock()
 	a.agentPCMMu.Unlock()
 	if cancel != nil {

@@ -297,10 +297,11 @@ final class AgentAudioBridge: @unchecked Sendable {
             }
             moduleIO.onUnavailable = { [weak self] in self?.moduleUnavailable(generation: generation) }
             moduleIO.onCapturePCM = { [weak self] pcm in
-                guard #available(macOS 27.0, *) else { return }
-                (self?.nativeTranscriber as? NativeSpeechTranscriber)?.appendPCM16LE(pcm)
+                guard #available(macOS 27.0, *), let self else { return }
+                let transcriber = self.lock.withLock { self.nativeTranscriber as? NativeSpeechTranscriber }
+                transcriber?.appendPCM16LE(pcm)
             }
-            startNativeTranscriber()
+            startNativeTranscriber(generation: generation)
             try startModuleIO(generation: generation, pullDownlink: { [weak self] in
                 self?.lock.withLock { self?.downlink.popOrSilence() } ?? Data(count: AgentAudioProtocol.pcmFrameBytes)
             }, pushUplink: { [weak self] pcm in
@@ -403,37 +404,66 @@ final class AgentAudioBridge: @unchecked Sendable {
         stopNativeTranscriber()
     }
 
-    private func startNativeTranscriber() {
-        guard #available(macOS 27.0, *) else { return }
-        let transcriber = NativeSpeechTranscriber { [weak self] text, isFinal in
-            self?.onNativeTranscript?(text, isFinal)
-            Task { await Self.reportNativeTranscript(text: text, isFinal: isFinal) }
+    private struct NativeTranscriptSession: Decodable {
+        let captureSessionID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case captureSessionID = "capture_session_id"
         }
-        nativeTranscriber = transcriber
-        Task {
-            try? await transcriber.start()
+    }
+
+    private func startNativeTranscriber(generation: UInt64) {
+        guard #available(macOS 27.0, *) else { return }
+        Task { [weak self] in
+            guard let self,
+                  let session: NativeTranscriptSession = try? await APIClient(timeoutInterval: 5).get("api/agent/audio/status"),
+                  let sessionID = session.captureSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sessionID.isEmpty else { return }
+            let transcriber = NativeSpeechTranscriber { [weak self] text, isFinal in
+                self?.onNativeTranscript?(text, isFinal)
+                Task { await Self.reportNativeTranscript(text: text, isFinal: isFinal, sessionID: sessionID) }
+            }
+            guard self.lock.withLock({ self.moduleIOGeneration == generation }) else { return }
+            do {
+                try await transcriber.start()
+            } catch {
+                return
+            }
+            let installed = self.lock.withLock { () -> Bool in
+                guard self.moduleIOGeneration == generation, self.nativeTranscriber == nil else { return false }
+                self.nativeTranscriber = transcriber
+                return true
+            }
+            if !installed {
+                await transcriber.stop()
+            }
         }
     }
 
     private func stopNativeTranscriber() {
         guard #available(macOS 27.0, *) else { return }
-        let transcriber = nativeTranscriber as? NativeSpeechTranscriber
-        nativeTranscriber = nil
+        let transcriber = lock.withLock { () -> NativeSpeechTranscriber? in
+            let value = nativeTranscriber as? NativeSpeechTranscriber
+            nativeTranscriber = nil
+            return value
+        }
         Task { await transcriber?.stop() }
     }
 
     private struct NativeTranscriptUpdate: Encodable {
         let text: String
         let isFinal: Bool
+        let sessionID: String
 
         enum CodingKeys: String, CodingKey {
             case text
             case isFinal = "final"
+            case sessionID = "session_id"
         }
     }
 
-    private static func reportNativeTranscript(text: String, isFinal: Bool) async {
-        let update = NativeTranscriptUpdate(text: text, isFinal: isFinal)
+    private static func reportNativeTranscript(text: String, isFinal: Bool, sessionID: String) async {
+        let update = NativeTranscriptUpdate(text: text, isFinal: isFinal, sessionID: sessionID)
         do {
             try await APIClient(timeoutInterval: 5).send(
                 "api/agent/audio/transcript", method: "PUT", body: update)

@@ -294,6 +294,7 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		scopes = append(scopes, scope)
 	}
 	sort.Strings(scopes)
+	audio := a.agentAudioSnapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"api_version":  "v1",
 		"actor":        principal.Kind,
@@ -302,9 +303,9 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		"safety": map[string]any{
 			"idempotency_required":          []string{"sms.send", "call.dial", "call.answer", "call.hangup", "call.agent_audio.start", "call.agent_audio.stop", "esim.switch"},
 			"raw_at_available":              false,
-			"agent_pcm_transport_available": a.agentAudioSnapshot().PCMTransportAvailable,
-			"voice_agent_available":         a.agentAudioSnapshot().VoiceAgentAvailable,
-			"asr_available":                 false,
+			"agent_pcm_transport_available": audio.PCMTransportAvailable,
+			"voice_agent_available":         audio.VoiceAgentAvailable,
+			"asr_available":                 audio.ASRAvailable,
 			"tts_available":                 false,
 		},
 	})

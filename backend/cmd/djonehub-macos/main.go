@@ -113,13 +113,14 @@ type app struct {
 	voiceEnabled bool
 
 	// Agent PCM 数据平面由原生 App 托管；后端保存传输状态，并在一次性验证码通话中作为受控客户端采集下行 PCM。
-	agentAudioMu       sync.RWMutex
-	agentAudio         agentAudioState
-	agentPCMMu         sync.Mutex
-	agentPCMCancel     context.CancelFunc
-	agentPCMSessionID  string
-	agentPCMGeneration uint64
-	agentPCMRunner     agentPCMRunnerFunc
+	agentAudioMu                sync.RWMutex
+	agentAudio                  agentAudioState
+	agentAudioResultExpiryTimer *time.Timer
+	agentPCMMu                  sync.Mutex
+	agentPCMCancel              context.CancelFunc
+	agentPCMSessionID           string
+	agentPCMGeneration          uint64
+	agentPCMRunner              agentPCMRunnerFunc
 
 	// 一次性语音验证码接听窗口：仅接听用户明确允许的号码。
 	voiceVerificationMu sync.Mutex
@@ -140,6 +141,11 @@ type app struct {
 	moduleVoiceRouteStop             func(string) error
 	moduleVoiceRouteAttemptedSession string
 	moduleVoiceRouteLastError        string
+	moduleVoiceRecoverySession       string
+	moduleVoiceRecoveryInProgress    bool
+	moduleVoiceRecoveryGeneration    uint64
+	moduleVoiceRecoveryActive        uint64
+	moduleVoiceRecoveryExhausted     string
 
 	// 来电事件缓存（URC 驱动），供通话状态查询在 CLCC 失败/无条目时兜底
 	callMu          sync.Mutex
