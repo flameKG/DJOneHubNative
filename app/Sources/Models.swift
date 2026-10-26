@@ -374,6 +374,31 @@ struct CallStatus: Decodable, Equatable {
     }
 }
 
+struct VoiceVerificationAudioStatus: Decodable {
+    let answered: Bool
+    let consumed: Bool
+    let audioAuthorized: Bool
+    let sessionID: String?
+
+    enum CodingKeys: String, CodingKey {
+        case answered, consumed
+        case audioAuthorized = "audio_authorized"
+        case sessionID = "session_id"
+    }
+}
+
+enum VoiceVerificationAudioPolicy {
+    static func reservesAgentAudio(callSessionID: String?, callActive: Bool,
+                                   verification: VoiceVerificationAudioStatus) -> Bool {
+        callActive
+            && verification.answered
+            && verification.consumed
+            && verification.audioAuthorized
+            && callSessionID != nil
+            && callSessionID == verification.sessionID
+    }
+}
+
 struct CallDTMFRequest: Encodable {
     let sessionID: String
     let tone: String

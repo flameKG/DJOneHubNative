@@ -521,7 +521,7 @@ final class DashboardStore: ObservableObject {
                     }
                 }
                 if status.isReady && callStatus.isActive && !audioRunning {
-                    startAudio()
+                    startHumanAudioUnlessAgentReserved()
                 }
                 if !status.isBusy {
                     callModeActionInFlight = false
@@ -739,7 +739,7 @@ final class DashboardStore: ObservableObject {
         // 只有蜂窝通话真正进入 active 后才建立模块 D4/UAC 路由，避免拨号音、
         // 未接通呼叫或来电铃声提前占用模块音频设备。
         if status.isActive && !previous.isActive {
-            startAudio()
+            startHumanAudioUnlessAgentReserved()
         }
         // 通话结束（非空闲 → 空闲）时清空来电信息
         if status.isIdle && (previous.isActive || previous.state == "unknown" || previous.isIncoming) {
@@ -909,6 +909,34 @@ final class DashboardStore: ObservableObject {
         dtmfQueue.removeAll()
         dtmfPendingCount = 0
         dtmfError = nil
+    }
+
+    private func startHumanAudioUnlessAgentReserved() {
+        let expectedSessionID = callStatus.sessionID
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let verification: VoiceVerificationAudioStatus = try await APIClient()
+                    .get("api/call/voice-verification")
+                guard self.callStatus.isActive,
+                      self.callStatus.sessionID == expectedSessionID else { return }
+                if VoiceVerificationAudioPolicy.reservesAgentAudio(
+                    callSessionID: self.callStatus.sessionID,
+                    callActive: self.callStatus.isActive,
+                    verification: verification
+                ) {
+                    // The backend owns this exact answered verification session.
+                    // Do not let the normal human bridge win the shared UAC owner.
+                    return
+                }
+            } catch {
+                // A normal call must remain usable if the optional verification
+                // status lookup is temporarily unavailable.
+            }
+            guard self.callStatus.isActive,
+                  self.callStatus.sessionID == expectedSessionID else { return }
+            self.startAudio()
+        }
     }
 
     private func startAudio() {
