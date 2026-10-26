@@ -53,6 +53,7 @@ type agentAudioState struct {
 	TranscriptFinal       bool             `json:"transcript_final"`
 	TranscriptSessionID   string           `json:"transcript_session_id,omitempty"`
 	TranscriptUpdatedAt   time.Time        `json:"transcript_updated_at,omitempty"`
+	VerificationCode      string           `json:"verification_code,omitempty"`
 }
 
 type agentAudioTransportUpdate struct {
@@ -149,6 +150,7 @@ func (a *app) agentAudioTranscript(w http.ResponseWriter, r *http.Request) {
 	a.agentAudio.Transcript = update.Text
 	a.agentAudio.TranscriptFinal = update.Final
 	a.agentAudio.TranscriptSessionID = strings.TrimSpace(update.SessionID)
+	a.agentAudio.VerificationCode = extractVerificationDigits(update.Text)
 	a.agentAudio.TranscriptUpdatedAt = time.Now()
 	a.agentAudioMu.Unlock()
 	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
@@ -176,6 +178,7 @@ func (a *app) agentAudioStop(w http.ResponseWriter, _ *http.Request) {
 	a.agentAudio.Transcript = ""
 	a.agentAudio.TranscriptFinal = false
 	a.agentAudio.TranscriptSessionID = ""
+	a.agentAudio.VerificationCode = ""
 	a.agentAudio.TranscriptUpdatedAt = time.Time{}
 	a.agentAudioMu.Unlock()
 	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
