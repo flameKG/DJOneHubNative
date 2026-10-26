@@ -823,6 +823,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /api/agent/capabilities", a.agentCapabilities)
 	mux.HandleFunc("PUT /api/agent/audio/transport", a.agentAudioTransport)
 	mux.HandleFunc("GET /api/agent/audio/status", a.agentAudioStatus)
+	mux.HandleFunc("PUT /api/agent/audio/transcript", a.agentAudioTranscript)
 	mux.HandleFunc("POST /api/agent/audio/start", a.agentAudioStart)
 	mux.HandleFunc("POST /api/agent/audio/stop", a.agentAudioStop)
 	mux.HandleFunc("GET /api/health", a.health)

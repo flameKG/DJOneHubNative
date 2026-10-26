@@ -407,6 +407,7 @@ final class AgentAudioBridge: @unchecked Sendable {
         guard #available(macOS 27.0, *) else { return }
         let transcriber = NativeSpeechTranscriber { [weak self] text, isFinal in
             self?.onNativeTranscript?(text, isFinal)
+            Task { await Self.reportNativeTranscript(text: text, isFinal: isFinal) }
         }
         nativeTranscriber = transcriber
         Task {
@@ -419,6 +420,26 @@ final class AgentAudioBridge: @unchecked Sendable {
         let transcriber = nativeTranscriber as? NativeSpeechTranscriber
         nativeTranscriber = nil
         Task { await transcriber?.stop() }
+    }
+
+    private struct NativeTranscriptUpdate: Encodable {
+        let text: String
+        let isFinal: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case text
+            case isFinal = "final"
+        }
+    }
+
+    private static func reportNativeTranscript(text: String, isFinal: Bool) async {
+        let update = NativeTranscriptUpdate(text: text, isFinal: isFinal)
+        do {
+            try await APIClient(timeoutInterval: 5).send(
+                "api/agent/audio/transcript", method: "PUT", body: update)
+        } catch {
+            // 转录结果不应阻塞实时音频线程；后端不可用时丢弃本次结果。
+        }
     }
 
     private func publishState() {

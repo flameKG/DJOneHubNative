@@ -184,6 +184,7 @@ func loadCLIAccessConfig(path string) (cliAccessConfig, error) {
 var cliScopeByRoute = map[string]string{
 	"GET /api/agent/capabilities":              "",
 	"GET /api/agent/audio/status":              "call.agent_audio",
+	"PUT /api/agent/audio/transcript":          "call.agent_audio",
 	"POST /api/agent/audio/start":              "call.agent_audio",
 	"POST /api/agent/audio/stop":               "call.agent_audio",
 	"GET /api/health":                          "device.read",

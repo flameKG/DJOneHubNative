@@ -49,6 +49,10 @@ type agentAudioState struct {
 	TTSAvailable          bool             `json:"tts_available"`
 	Format                agentAudioFormat `json:"format"`
 	Error                 string           `json:"error,omitempty"`
+	Transcript            string           `json:"transcript,omitempty"`
+	TranscriptFinal       bool             `json:"transcript_final"`
+	TranscriptSessionID   string           `json:"transcript_session_id,omitempty"`
+	TranscriptUpdatedAt   time.Time        `json:"transcript_updated_at,omitempty"`
 }
 
 type agentAudioTransportUpdate struct {
@@ -58,6 +62,12 @@ type agentAudioTransportUpdate struct {
 	SocketPath      string `json:"socket_path"`
 	ClientConnected bool   `json:"client_connected"`
 	Error           string `json:"error"`
+}
+
+type agentAudioTranscriptUpdate struct {
+	Text      string `json:"text"`
+	Final     bool   `json:"final"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 func fixedAgentAudioFormat() agentAudioFormat {
@@ -121,6 +131,29 @@ func (a *app) agentAudioStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
 }
 
+func (a *app) agentAudioTranscript(w http.ResponseWriter, r *http.Request) {
+	defer r.Body.Close()
+	var update agentAudioTranscriptUpdate
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&update); err != nil {
+		writeCodedError(w, http.StatusBadRequest, "invalid_agent_audio_transcript", "原生转录结果无效", false)
+		return
+	}
+	update.Text = strings.TrimSpace(update.Text)
+	if len(update.Text) > 4000 {
+		writeCodedError(w, http.StatusBadRequest, "agent_audio_transcript_too_large", "原生转录结果过长", false)
+		return
+	}
+	a.agentAudioMu.Lock()
+	a.agentAudio.Transcript = update.Text
+	a.agentAudio.TranscriptFinal = update.Final
+	a.agentAudio.TranscriptSessionID = strings.TrimSpace(update.SessionID)
+	a.agentAudio.TranscriptUpdatedAt = time.Now()
+	a.agentAudioMu.Unlock()
+	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
+}
+
 func (a *app) agentAudioStart(w http.ResponseWriter, _ *http.Request) {
 	state := a.agentAudioSnapshot()
 	if !state.VoiceAgentAvailable {
@@ -140,6 +173,10 @@ func (a *app) agentAudioStop(w http.ResponseWriter, _ *http.Request) {
 	})
 	a.agentAudioMu.Lock()
 	a.agentAudio.Active = false
+	a.agentAudio.Transcript = ""
+	a.agentAudio.TranscriptFinal = false
+	a.agentAudio.TranscriptSessionID = ""
+	a.agentAudio.TranscriptUpdatedAt = time.Time{}
 	a.agentAudioMu.Unlock()
 	writeJSON(w, http.StatusOK, a.agentAudioSnapshot())
 }
