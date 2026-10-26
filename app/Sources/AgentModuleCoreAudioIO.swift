@@ -339,8 +339,12 @@ final class CoreAudioAgentModuleAudioIO: AgentModuleAudioIO, @unchecked Sendable
             active = true
             ioLock.unlock()
 
-            try register(pair.input.id, name: pair.input.name, format: pair.input.input!, direction: .capture)
+            // QDC507's AC input endpoint can remain blocked until the AS output
+            // endpoint has opened the module's USB audio clock/route. Start
+            // playback first, then capture; readiness still requires callbacks
+            // from both directions.
             try register(pair.output.id, name: pair.output.name, format: pair.output.output!, direction: .playback)
+            try register(pair.input.id, name: pair.input.name, format: pair.input.input!, direction: .capture)
             try installAliveListeners(for: Set([pair.input.id, pair.output.id]))
 
             ioLock.lock()

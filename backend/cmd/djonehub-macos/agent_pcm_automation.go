@@ -51,17 +51,23 @@ func (a *app) ensureModuleVoiceRoute(sessionID string) error {
 	a.moduleVoiceRouteAttemptedSession = sessionID
 	a.moduleVoiceRouteLastError = ""
 	starter := a.moduleVoiceRouteStart
-	a.moduleVoiceMu.Unlock()
+	usesProductionStarter := starter == nil
 	if starter == nil {
 		starter = func(directory string) error {
 			return a.startModuleVoiceRoute(directory)
 		}
 	}
+	a.moduleVoiceMu.Unlock()
 	if err := starter(a.runtimeDirectory()); err != nil {
 		a.moduleVoiceMu.Lock()
 		a.moduleVoiceRouteLastError = err.Error()
 		a.moduleVoiceMu.Unlock()
 		return err
+	}
+	if usesProductionStarter {
+		// audio_enable=1 can re-enumerate AC/AS asynchronously. Give CoreAudio
+		// a bounded settle window before the Agent client opens the endpoints.
+		time.Sleep(3 * time.Second)
 	}
 	a.moduleVoiceMu.Lock()
 	a.moduleVoiceRoute = true
