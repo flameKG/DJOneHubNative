@@ -14,8 +14,11 @@ func runInternalADBProbe() error {
 
 func (a *app) resetModuleVoiceState() {
 	a.moduleVoiceMu.Lock()
+	a.moduleVoiceTransitionGeneration++
 	a.moduleVoicePrepared = false
 	a.moduleVoiceRoute = false
+	a.moduleVoiceRouteAttemptedSession = ""
+	a.moduleVoiceRouteLastError = ""
 	a.moduleVoiceMu.Unlock()
 }
 

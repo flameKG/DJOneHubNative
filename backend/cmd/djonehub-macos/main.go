@@ -139,6 +139,7 @@ type app struct {
 	moduleVoiceAutoStart             bool
 	moduleVoiceRouteStart            func(string) error
 	moduleVoiceRouteStop             func(string) error
+	moduleVoiceRouteSettle           func()
 	moduleVoiceRouteAttemptedSession string
 	moduleVoiceRouteLastError        string
 	moduleVoiceRecoverySession       string
@@ -146,6 +147,9 @@ type app struct {
 	moduleVoiceRecoveryGeneration    uint64
 	moduleVoiceRecoveryActive        uint64
 	moduleVoiceRecoveryExhausted     string
+	moduleVoiceTeardownMu            sync.Mutex
+	moduleVoiceTeardownInProgress    bool
+	moduleVoiceTransitionGeneration  uint64
 
 	// 来电事件缓存（URC 驱动），供通话状态查询在 CLCC 失败/无条目时兜底
 	callMu          sync.Mutex
@@ -444,7 +448,7 @@ func serve(instance *app, listen string) {
 		if voiceRouteActive {
 			cleanupDone := make(chan struct{})
 			go func() {
-				if err := instance.stopModuleVoiceRoute(instance.runtimeDirectory()); err != nil {
+				if err := instance.stopModuleVoiceRouteSafely(3 * time.Second); err != nil {
 					log.Printf("stop module voice route during shutdown: %v", err)
 				}
 				close(cleanupDone)
@@ -2702,7 +2706,7 @@ func (a *app) callHangup(w http.ResponseWriter, _ *http.Request) {
 	a.moduleVoiceMu.Unlock()
 	warning := ""
 	if voiceRouteActive {
-		if stopErr := a.stopModuleVoiceRoute(a.runtimeDirectory()); stopErr != nil {
+		if stopErr := a.stopModuleVoiceRouteSafely(2 * time.Second); stopErr != nil {
 			log.Printf("stop module voice route after hangup: %v", stopErr)
 			warning = "通话已挂断，但模块音频路由清理未完全确认：" + stopErr.Error()
 		}

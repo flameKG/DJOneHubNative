@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -13,6 +15,7 @@ type agentPCMRunnerFunc func(context.Context, string, func([]byte)) error
 var (
 	errModuleVoiceRecoveryInProgress = errors.New("模块语音路由正在执行单次自动恢复")
 	errModuleVoiceRecoveryExhausted  = errors.New("模块音频单次自动恢复已用尽，需要授权重启 CoreAudio")
+	errModuleVoiceTeardownInProgress = errors.New("模块语音路由正在等待原生 CoreAudio 安全停止")
 )
 
 func (a *app) completedCaptureLocked(captureError string, endedAt time.Time) *captureMetrics {
@@ -46,8 +49,13 @@ func (a *app) reconcileVoiceVerificationAudio(ctx context.Context, call callStat
 	authorized := call.State == "active" && call.Active && window.Answered && window.Consumed && window.AudioAuthorized &&
 		window.SessionID != "" && call.SessionID == window.SessionID
 	if authorized {
+		if a.moduleVoiceTeardownPending() {
+			if err := a.stopModuleVoiceRouteSafelyPreservingRecovery(100 * time.Millisecond); err != nil {
+				return
+			}
+		}
 		if err := a.ensureModuleVoiceRoute(call.SessionID); err != nil {
-			if errors.Is(err, errModuleVoiceRecoveryInProgress) {
+			if errors.Is(err, errModuleVoiceRecoveryInProgress) || errors.Is(err, errModuleVoiceTeardownInProgress) {
 				return
 			}
 			if errors.Is(err, errModuleVoiceRecoveryExhausted) {
@@ -66,9 +74,123 @@ func (a *app) reconcileVoiceVerificationAudio(ctx context.Context, call callStat
 		return
 	}
 	// Fail closed: any transition away from the exact authorized active session
-	// immediately revokes capture, including held/unknown/replaced calls.
+	// immediately revokes capture, including held/unknown/replaced calls. Keep the
+	// module route alive until the native process confirms both CoreAudio IOProcs
+	// have stopped; tearing the route down first can wedge QDC507's AC endpoint.
+	if err := a.stopModuleVoiceRouteSafely(2 * time.Second); err != nil {
+		a.agentAudioMu.Lock()
+		a.agentAudio.CaptureError = "模块音频清理等待原生 CoreAudio 停止超时：" + err.Error()
+		a.agentAudioMu.Unlock()
+	}
+}
+
+func (a *app) nativeModuleAudioStillActive() bool {
+	a.agentAudioMu.RLock()
+	defer a.agentAudioMu.RUnlock()
+	return a.agentAudio.ClientConnected || a.agentAudio.ModuleIOReady
+}
+
+func (a *app) moduleVoiceTeardownPending() bool {
+	if !a.moduleVoiceMu.TryLock() {
+		return true
+	}
+	defer a.moduleVoiceMu.Unlock()
+	return a.moduleVoiceTeardownInProgress
+}
+
+func tryLockMutexUntil(mu *sync.Mutex, deadline time.Time) bool {
+	for {
+		if mu.TryLock() {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func (a *app) stopModuleVoiceRouteSafely(timeout time.Duration) error {
+	return a.stopModuleVoiceRouteSafelyWithPolicy(timeout, false)
+}
+
+func (a *app) stopModuleVoiceRouteSafelyPreservingRecovery(timeout time.Duration) error {
+	return a.stopModuleVoiceRouteSafelyWithPolicy(timeout, true)
+}
+
+func (a *app) stopModuleVoiceRouteSafelyWithPolicy(timeout time.Duration, preserveRecoveryExhausted bool) error {
+	deadline := time.Now().Add(timeout)
+	if !tryLockMutexUntil(&a.moduleVoiceTeardownMu, deadline) {
+		return errors.New("模块语音路由已有清理操作尚未结束")
+	}
+	defer a.moduleVoiceTeardownMu.Unlock()
+
+	if !tryLockMutexUntil(&a.moduleVoiceMu, deadline) {
+		return errors.New("模块语音路由状态切换尚未结束")
+	}
+	a.moduleVoiceTeardownInProgress = true
+	a.moduleVoiceTransitionGeneration++
+	a.moduleVoiceMu.Unlock()
+
 	a.stopVoiceVerificationAudio()
-	a.stopModuleVoiceRouteForCall()
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	if err := a.waitForNativeModuleAudioStop(remaining); err != nil {
+		return err
+	}
+	if err := a.stopModuleVoiceRouteConfirmed(preserveRecoveryExhausted); err != nil {
+		return err
+	}
+	a.moduleVoiceMu.Lock()
+	a.moduleVoiceTeardownInProgress = false
+	a.moduleVoiceMu.Unlock()
+	return nil
+}
+
+func (a *app) stopModuleVoiceRouteConfirmed(preserveRecoveryExhausted bool) error {
+	a.moduleVoiceMu.Lock()
+	a.moduleVoiceRecoveryGeneration++
+	if !preserveRecoveryExhausted {
+		a.moduleVoiceRecoverySession = ""
+		a.moduleVoiceRecoveryExhausted = ""
+	}
+	if a.moduleVoiceRecoveryInProgress {
+		a.moduleVoiceRouteAttemptedSession = ""
+		a.moduleVoiceRouteLastError = ""
+		a.moduleVoiceMu.Unlock()
+		return errors.New("模块语音路由恢复尚未结束")
+	}
+	active := a.moduleVoiceRoute
+	stopper := a.moduleVoiceRouteStop
+	a.moduleVoiceRouteAttemptedSession = ""
+	a.moduleVoiceRouteLastError = ""
+	a.moduleVoiceMu.Unlock()
+	if !active {
+		return nil
+	}
+	if stopper == nil {
+		stopper = func(directory string) error { return a.stopModuleVoiceRoute(directory) }
+	}
+	if err := stopper(a.runtimeDirectory()); err != nil {
+		return err
+	}
+	a.moduleVoiceMu.Lock()
+	a.moduleVoiceRoute = false
+	a.moduleVoiceMu.Unlock()
+	return nil
+}
+
+func (a *app) waitForNativeModuleAudioStop(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for a.nativeModuleAudioStillActive() {
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("原生模块音频状态未确认停止")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
 }
 
 func (a *app) ensureModuleVoiceRoute(sessionID string) error {
@@ -76,6 +198,10 @@ func (a *app) ensureModuleVoiceRoute(sessionID string) error {
 		return nil
 	}
 	a.moduleVoiceMu.Lock()
+	if a.moduleVoiceTeardownInProgress {
+		a.moduleVoiceMu.Unlock()
+		return errModuleVoiceTeardownInProgress
+	}
 	if a.moduleVoiceRecoveryInProgress {
 		a.moduleVoiceMu.Unlock()
 		return errModuleVoiceRecoveryInProgress
@@ -98,8 +224,10 @@ func (a *app) ensureModuleVoiceRoute(sessionID string) error {
 	}
 	a.moduleVoiceRouteAttemptedSession = sessionID
 	a.moduleVoiceRouteLastError = ""
+	transitionGeneration := a.moduleVoiceTransitionGeneration
 	starter := a.moduleVoiceRouteStart
 	usesProductionStarter := starter == nil
+	settle := a.moduleVoiceRouteSettle
 	if starter == nil {
 		starter = func(directory string) error {
 			return a.startModuleVoiceRoute(directory)
@@ -108,58 +236,30 @@ func (a *app) ensureModuleVoiceRoute(sessionID string) error {
 	a.moduleVoiceMu.Unlock()
 	if err := starter(a.runtimeDirectory()); err != nil {
 		a.moduleVoiceMu.Lock()
-		a.moduleVoiceRouteLastError = err.Error()
+		if a.moduleVoiceTransitionGeneration == transitionGeneration && !a.moduleVoiceTeardownInProgress {
+			a.moduleVoiceRouteLastError = err.Error()
+		}
 		a.moduleVoiceMu.Unlock()
 		return err
 	}
-	if usesProductionStarter {
+	if usesProductionStarter || settle != nil {
 		// audio_enable=1 can re-enumerate AC/AS asynchronously. Give CoreAudio
 		// a bounded settle window before the Agent client opens the endpoints.
-		time.Sleep(3 * time.Second)
+		if settle != nil {
+			settle()
+		} else {
+			time.Sleep(3 * time.Second)
+		}
 	}
 	a.moduleVoiceMu.Lock()
+	if a.moduleVoiceTeardownInProgress || a.moduleVoiceTransitionGeneration != transitionGeneration {
+		a.moduleVoiceMu.Unlock()
+		return errModuleVoiceTeardownInProgress
+	}
 	a.moduleVoiceRoute = true
 	a.moduleVoiceRouteLastError = ""
 	a.moduleVoiceMu.Unlock()
 	return nil
-}
-
-func (a *app) stopModuleVoiceRouteForCall() {
-	if !a.moduleVoiceAutoStart {
-		return
-	}
-	a.moduleVoiceMu.Lock()
-	a.moduleVoiceRecoveryGeneration++
-	a.moduleVoiceRecoverySession = ""
-	a.moduleVoiceRecoveryExhausted = ""
-	if a.moduleVoiceRecoveryInProgress {
-		a.moduleVoiceRouteAttemptedSession = ""
-		a.moduleVoiceRouteLastError = ""
-		a.moduleVoiceMu.Unlock()
-		return
-	}
-	active := a.moduleVoiceRoute
-	stopper := a.moduleVoiceRouteStop
-	a.moduleVoiceRouteAttemptedSession = ""
-	a.moduleVoiceRouteLastError = ""
-	a.moduleVoiceMu.Unlock()
-	if !active {
-		return
-	}
-	if stopper == nil {
-		stopper = func(directory string) error {
-			return a.stopModuleVoiceRoute(directory)
-		}
-	}
-	if err := stopper(a.runtimeDirectory()); err != nil {
-		a.agentAudioMu.Lock()
-		a.agentAudio.CaptureError = "模块语音路由清理失败：" + err.Error()
-		a.agentAudioMu.Unlock()
-		return
-	}
-	a.moduleVoiceMu.Lock()
-	a.moduleVoiceRoute = false
-	a.moduleVoiceMu.Unlock()
 }
 
 func isRecoverableModuleIOError(err error) bool {
@@ -190,17 +290,25 @@ func (a *app) reserveModuleVoiceRecovery(sessionID string, runErr error) (uint64
 }
 
 func (a *app) completeReservedModuleVoiceRecovery(sessionID string, generation uint64) bool {
+	a.moduleVoiceTeardownMu.Lock()
+	defer a.moduleVoiceTeardownMu.Unlock()
 	a.moduleVoiceMu.Lock()
+	a.moduleVoiceTeardownInProgress = true
+	a.moduleVoiceTransitionGeneration++
 	active := a.moduleVoiceRoute
 	stopper := a.moduleVoiceRouteStop
 	a.moduleVoiceMu.Unlock()
 
 	var recoveryErr error
 	if active {
-		if stopper == nil {
-			stopper = func(directory string) error { return a.stopModuleVoiceRoute(directory) }
+		if waitErr := a.waitForNativeModuleAudioStop(2 * time.Second); waitErr != nil {
+			recoveryErr = waitErr
+		} else {
+			if stopper == nil {
+				stopper = func(directory string) error { return a.stopModuleVoiceRoute(directory) }
+			}
+			recoveryErr = stopper(a.runtimeDirectory())
 		}
-		recoveryErr = stopper(a.runtimeDirectory())
 	}
 
 	a.moduleVoiceMu.Lock()
@@ -218,6 +326,9 @@ func (a *app) completeReservedModuleVoiceRecovery(sessionID string, generation u
 	if ownsRecovery {
 		a.moduleVoiceRecoveryInProgress = false
 		a.moduleVoiceRecoveryActive = 0
+	}
+	if recoveryErr == nil {
+		a.moduleVoiceTeardownInProgress = false
 	}
 	a.moduleVoiceMu.Unlock()
 

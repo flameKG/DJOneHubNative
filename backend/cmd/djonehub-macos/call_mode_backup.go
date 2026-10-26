@@ -584,7 +584,7 @@ func (a *app) runCallModeRestore(backupID string) {
 	routeActive := a.moduleVoiceRoute
 	a.moduleVoiceMu.Unlock()
 	if routeActive {
-		if err := a.stopModuleVoiceRoute(a.runtimeDirectory()); err != nil {
+		if err := a.stopModuleVoiceRouteSafely(2 * time.Second); err != nil {
 			a.failCallMode("无法停止当前通话音频路由", err.Error())
 			return
 		}

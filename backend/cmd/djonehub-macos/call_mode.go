@@ -1328,8 +1328,8 @@ func (a *app) callAudioStartAPI(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) callAudioStopAPI(w http.ResponseWriter, _ *http.Request) {
-	if err := a.stopModuleVoiceRoute(a.runtimeDirectory()); err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+	if err := a.stopModuleVoiceRouteSafely(2 * time.Second); err != nil {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"stopped": true})

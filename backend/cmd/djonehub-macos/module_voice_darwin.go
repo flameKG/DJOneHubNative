@@ -68,8 +68,11 @@ func probeModuleADBDirect() error {
 
 func (a *app) resetModuleVoiceState() {
 	a.moduleVoiceMu.Lock()
+	a.moduleVoiceTransitionGeneration++
 	a.moduleVoicePrepared = false
 	a.moduleVoiceRoute = false
+	a.moduleVoiceRouteAttemptedSession = ""
+	a.moduleVoiceRouteLastError = ""
 	a.moduleVoiceMu.Unlock()
 }
 
@@ -198,6 +201,9 @@ func (a *app) startModuleVoiceRoute(directory string) error {
 	defer a.voiceUSBTransition.Unlock()
 	a.moduleVoiceMu.Lock()
 	defer a.moduleVoiceMu.Unlock()
+	if a.moduleVoiceTeardownInProgress {
+		return errModuleVoiceTeardownInProgress
+	}
 	if ready, _ := a.moduleVoiceRouteReady(); ready {
 		a.moduleVoiceRoute = true
 		return nil
@@ -236,7 +242,7 @@ func (a *app) selfTestModuleVoiceRoute(directory string) error {
 	if err := a.startModuleVoiceRoute(directory); err != nil {
 		return err
 	}
-	if err := a.stopModuleVoiceRoute(directory); err != nil {
+	if err := a.stopModuleVoiceRouteSafely(2 * time.Second); err != nil {
 		return fmt.Errorf("语音路由已启动，但安全回滚未通过：%w", err)
 	}
 	return nil
