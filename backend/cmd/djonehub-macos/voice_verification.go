@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -16,6 +17,18 @@ type voiceVerificationWindow struct {
 	Consumed        bool      `json:"consumed"`
 	AudioAuthorized bool      `json:"audio_authorized"`
 	LastError       string    `json:"last_error,omitempty"`
+	generation      uint64
+	answering       bool
+	attemptNumber   string
+	attemptSession  string
+	attemptCallID   int
+}
+
+type voiceVerificationAttempt struct {
+	generation uint64
+	number     string
+	sessionID  string
+	callID     int
 }
 
 func (a *app) armVoiceVerification(duration time.Duration, allowed []string) voiceVerificationWindow {
@@ -27,6 +40,8 @@ func (a *app) armVoiceVerification(duration time.Duration, allowed []string) voi
 		AllowedNumbers: append([]string(nil), allowed...),
 	}
 	a.voiceVerificationMu.Lock()
+	a.voiceVerificationGeneration++
+	window.generation = a.voiceVerificationGeneration
 	a.voiceVerification = &window
 	a.voiceVerificationMu.Unlock()
 	return window
@@ -38,19 +53,30 @@ func (a *app) voiceVerificationSnapshot() voiceVerificationWindow {
 	if a.voiceVerification == nil {
 		return voiceVerificationWindow{}
 	}
+	a.expireVoiceVerificationLocked(time.Now())
 	window := *a.voiceVerification
 	window.AllowedNumbers = append([]string(nil), a.voiceVerification.AllowedNumbers...)
-	if window.Active && !window.ExpiresAt.IsZero() && time.Now().After(window.ExpiresAt) {
-		window.Active = false
-	}
 	return window
+}
+
+func (a *app) expireVoiceVerificationLocked(now time.Time) {
+	if a.voiceVerification == nil || !a.voiceVerification.Active || a.voiceVerification.ExpiresAt.IsZero() || !now.After(a.voiceVerification.ExpiresAt) {
+		return
+	}
+	a.voiceVerificationGeneration++
+	a.voiceVerification.Active = false
+	a.voiceVerification.answering = false
+	a.voiceVerification.generation = a.voiceVerificationGeneration
 }
 
 func (a *app) disarmVoiceVerification() {
 	a.voiceVerificationMu.Lock()
+	a.voiceVerificationGeneration++
 	if a.voiceVerification != nil {
 		a.voiceVerification.Active = false
 		a.voiceVerification.AudioAuthorized = false
+		a.voiceVerification.answering = false
+		a.voiceVerification.generation = a.voiceVerificationGeneration
 	}
 	a.voiceVerificationMu.Unlock()
 	a.stopVoiceVerificationAudio()
@@ -88,35 +114,172 @@ func (a *app) runVoiceVerificationAutomation(ctx context.Context) {
 			return
 		case <-ticker.C:
 			state := a.currentCallState()
+			if a.handleVoiceVerificationIncoming(state) {
+				continue
+			}
 			a.reconcileVoiceVerificationAudio(ctx, state)
-			window := a.voiceVerificationSnapshot()
-			if !window.Active {
-				continue
-			}
-			if state.State != "incoming" || !a.voiceVerificationNumberAllowed(state.Number) {
-				continue
-			}
-			if err := a.answerCurrentCall(); err != nil {
-				a.updateVoiceVerification(func(current *voiceVerificationWindow) {
-					current.LastError = err.Error()
-				})
-				continue
-			}
-			a.updateVoiceVerification(func(current *voiceVerificationWindow) {
-				current.Active = false
-				current.Answered = true
-				current.Consumed = true
-				current.AudioAuthorized = true
-				current.SessionID = state.SessionID
-				current.LastError = ""
-			})
 		}
+	}
+}
+
+func (a *app) handleVoiceVerificationIncoming(state callStateInfo) bool {
+	attempt, started, handled := a.reserveVoiceVerificationAttempt(state)
+	if !handled {
+		return false
+	}
+	if !started {
+		return true
+	}
+	// Prewarm the module route while the caller still hears ringing. Once ATA
+	// succeeds, the active-call reconciliation can open AC/AS immediately instead
+	// of losing the first several seconds to route setup and CoreAudio settling.
+	ownership, err := a.ensureModuleVoiceRouteOwned(attempt.sessionID)
+	if err != nil {
+		if errors.Is(err, errModuleVoiceStartInProgress) {
+			a.deferVoiceVerificationAttempt(attempt)
+			return true
+		}
+		message := "模块语音路由预热失败：" + err.Error()
+		if cleanupErr := a.rollbackOwnedModuleVoiceRoute(ownership); cleanupErr != nil {
+			message += "；模块音频预热清理未完成：" + cleanupErr.Error()
+		}
+		a.failVoiceVerificationAttempt(attempt, message)
+		return true
+	}
+
+	// Keep callControlMu through the identity check and ATA so a concurrent call
+	// operation cannot replace the checked incoming call before it is answered.
+	a.callControlMu.Lock()
+	currentCall := a.queryCallState()
+	a.voiceVerificationMu.Lock()
+	if !a.voiceVerificationAttemptValidLocked(attempt, currentCall) {
+		if a.voiceVerificationAttemptCurrentLocked(attempt) {
+			a.consumeVoiceVerificationFailureLocked("来电身份已变更，已取消自动接听")
+		}
+		a.voiceVerificationMu.Unlock()
+		a.callControlMu.Unlock()
+		_ = a.rollbackOwnedModuleVoiceRoute(ownership)
+		return true
+	}
+	answer := a.voiceVerificationAnswer
+	if answer == nil {
+		answer = a.answerCurrentCallLocked
+	}
+	if err := answer(); err != nil {
+		a.consumeVoiceVerificationFailureLocked(err.Error())
+		a.voiceVerificationMu.Unlock()
+		a.callControlMu.Unlock()
+		if cleanupErr := a.rollbackOwnedModuleVoiceRoute(ownership); cleanupErr != nil {
+			a.appendVoiceVerificationAttemptError(attempt, "模块音频预热清理未完成："+cleanupErr.Error())
+		}
+		return true
+	}
+	a.voiceVerification.Active = false
+	a.voiceVerification.Answered = true
+	a.voiceVerification.Consumed = true
+	a.voiceVerification.AudioAuthorized = true
+	a.voiceVerification.SessionID = attempt.sessionID
+	a.voiceVerification.LastError = ""
+	a.voiceVerification.answering = false
+	a.voiceVerificationMu.Unlock()
+	a.callControlMu.Unlock()
+	return true
+}
+
+func (a *app) reserveVoiceVerificationAttempt(state callStateInfo) (voiceVerificationAttempt, bool, bool) {
+	a.voiceVerificationMu.Lock()
+	defer a.voiceVerificationMu.Unlock()
+	a.expireVoiceVerificationLocked(time.Now())
+	window := a.voiceVerification
+	if window == nil || !window.Active || state.State != "incoming" || strings.TrimSpace(state.SessionID) == "" || !voiceVerificationNumberAllowedLocked(window, state.Number) {
+		return voiceVerificationAttempt{}, false, false
+	}
+	if window.answering {
+		return voiceVerificationAttempt{}, false, true
+	}
+	attempt := voiceVerificationAttempt{
+		generation: window.generation,
+		number:     strings.TrimSpace(state.Number),
+		sessionID:  state.SessionID,
+		callID:     state.moduleCallID,
+	}
+	window.answering = true
+	window.attemptNumber = attempt.number
+	window.attemptSession = attempt.sessionID
+	window.attemptCallID = attempt.callID
+	return attempt, true, true
+}
+
+func voiceVerificationNumberAllowedLocked(window *voiceVerificationWindow, number string) bool {
+	number = strings.TrimSpace(number)
+	for _, allowed := range window.AllowedNumbers {
+		if number == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *app) voiceVerificationAttemptCurrentLocked(attempt voiceVerificationAttempt) bool {
+	window := a.voiceVerification
+	return window != nil && window.generation == attempt.generation && window.answering && window.attemptNumber == attempt.number && window.attemptSession == attempt.sessionID && window.attemptCallID == attempt.callID
+}
+
+func (a *app) voiceVerificationAttemptValidLocked(attempt voiceVerificationAttempt, current callStateInfo) bool {
+	a.expireVoiceVerificationLocked(time.Now())
+	if !a.voiceVerificationAttemptCurrentLocked(attempt) || !a.voiceVerification.Active || current.State != "incoming" || strings.TrimSpace(current.Number) != attempt.number || current.SessionID != attempt.sessionID {
+		return false
+	}
+	return attempt.callID == 0 || current.moduleCallID == attempt.callID
+}
+
+func (a *app) consumeVoiceVerificationFailureLocked(message string) {
+	a.voiceVerification.Active = false
+	a.voiceVerification.Answered = false
+	a.voiceVerification.Consumed = true
+	a.voiceVerification.AudioAuthorized = false
+	a.voiceVerification.SessionID = ""
+	a.voiceVerification.LastError = message
+	a.voiceVerification.answering = false
+}
+
+func (a *app) failVoiceVerificationAttempt(attempt voiceVerificationAttempt, message string) {
+	a.voiceVerificationMu.Lock()
+	defer a.voiceVerificationMu.Unlock()
+	if a.voiceVerificationAttemptCurrentLocked(attempt) {
+		a.consumeVoiceVerificationFailureLocked(message)
+	}
+}
+
+func (a *app) deferVoiceVerificationAttempt(attempt voiceVerificationAttempt) {
+	a.voiceVerificationMu.Lock()
+	defer a.voiceVerificationMu.Unlock()
+	if a.voiceVerificationAttemptCurrentLocked(attempt) {
+		a.voiceVerification.answering = false
+		a.voiceVerification.attemptNumber = ""
+		a.voiceVerification.attemptSession = ""
+		a.voiceVerification.attemptCallID = 0
+	}
+}
+
+func (a *app) appendVoiceVerificationAttemptError(attempt voiceVerificationAttempt, message string) {
+	a.voiceVerificationMu.Lock()
+	defer a.voiceVerificationMu.Unlock()
+	if a.voiceVerification != nil && a.voiceVerification.generation == attempt.generation && a.voiceVerification.Consumed {
+		if a.voiceVerification.LastError != "" {
+			a.voiceVerification.LastError += "；"
+		}
+		a.voiceVerification.LastError += message
 	}
 }
 
 func (a *app) answerCurrentCall() error {
 	a.callControlMu.Lock()
 	defer a.callControlMu.Unlock()
+	return a.answerCurrentCallLocked()
+}
+
+func (a *app) answerCurrentCallLocked() error {
 	if state := a.queryCallState().State; state != "incoming" {
 		return &voiceVerificationError{message: "当前通话状态为 " + state}
 	}

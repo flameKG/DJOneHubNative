@@ -123,8 +123,10 @@ type app struct {
 	agentPCMRunner              agentPCMRunnerFunc
 
 	// 一次性语音验证码接听窗口：仅接听用户明确允许的号码。
-	voiceVerificationMu sync.Mutex
-	voiceVerification   *voiceVerificationWindow
+	voiceVerificationMu         sync.Mutex
+	voiceVerification           *voiceVerificationWindow
+	voiceVerificationGeneration uint64
+	voiceVerificationAnswer     func() error
 
 	// 通话模式：USB 初始化、运行时下载与模块侧语音路由状态。
 	callModeMu        sync.RWMutex
@@ -136,6 +138,8 @@ type app struct {
 	voiceUSBTransition               sync.RWMutex
 	moduleVoicePrepared              bool
 	moduleVoiceRoute                 bool
+	moduleVoiceRouteStarting         bool
+	moduleVoiceRouteStartGeneration  uint64
 	moduleVoiceAutoStart             bool
 	moduleVoiceRouteStart            func(string) error
 	moduleVoiceRouteStop             func(string) error
