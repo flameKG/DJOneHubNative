@@ -15,12 +15,88 @@ func (a *app) reconcileVoiceVerificationAudio(ctx context.Context, call callStat
 	authorized := call.State == "active" && call.Active && window.Answered && window.Consumed && window.AudioAuthorized &&
 		window.SessionID != "" && call.SessionID == window.SessionID
 	if authorized {
+		if err := a.ensureModuleVoiceRoute(call.SessionID); err != nil {
+			a.stopVoiceVerificationAudio()
+			a.agentAudioMu.Lock()
+			a.agentAudio.CaptureError = "模块语音路由启动失败：" + err.Error()
+			a.agentAudioMu.Unlock()
+			return
+		}
 		a.startVoiceVerificationAudio(ctx, call.SessionID)
 		return
 	}
 	// Fail closed: any transition away from the exact authorized active session
 	// immediately revokes capture, including held/unknown/replaced calls.
 	a.stopVoiceVerificationAudio()
+	a.stopModuleVoiceRouteForCall()
+}
+
+func (a *app) ensureModuleVoiceRoute(sessionID string) error {
+	if !a.moduleVoiceAutoStart {
+		return nil
+	}
+	a.moduleVoiceMu.Lock()
+	if a.moduleVoiceRoute {
+		a.moduleVoiceMu.Unlock()
+		return nil
+	}
+	if a.moduleVoiceRouteAttemptedSession == sessionID {
+		err := a.moduleVoiceRouteLastError
+		a.moduleVoiceMu.Unlock()
+		if err == "" {
+			return errors.New("模块语音路由启动未完成")
+		}
+		return errors.New(err)
+	}
+	a.moduleVoiceRouteAttemptedSession = sessionID
+	a.moduleVoiceRouteLastError = ""
+	starter := a.moduleVoiceRouteStart
+	a.moduleVoiceMu.Unlock()
+	if starter == nil {
+		starter = func(directory string) error {
+			return a.startModuleVoiceRoute(directory)
+		}
+	}
+	if err := starter(a.runtimeDirectory()); err != nil {
+		a.moduleVoiceMu.Lock()
+		a.moduleVoiceRouteLastError = err.Error()
+		a.moduleVoiceMu.Unlock()
+		return err
+	}
+	a.moduleVoiceMu.Lock()
+	a.moduleVoiceRoute = true
+	a.moduleVoiceRouteLastError = ""
+	a.moduleVoiceMu.Unlock()
+	return nil
+}
+
+func (a *app) stopModuleVoiceRouteForCall() {
+	if !a.moduleVoiceAutoStart {
+		return
+	}
+	a.moduleVoiceMu.Lock()
+	active := a.moduleVoiceRoute
+	stopper := a.moduleVoiceRouteStop
+	a.moduleVoiceRouteAttemptedSession = ""
+	a.moduleVoiceRouteLastError = ""
+	a.moduleVoiceMu.Unlock()
+	if !active {
+		return
+	}
+	if stopper == nil {
+		stopper = func(directory string) error {
+			return a.stopModuleVoiceRoute(directory)
+		}
+	}
+	if err := stopper(a.runtimeDirectory()); err != nil {
+		a.agentAudioMu.Lock()
+		a.agentAudio.CaptureError = "模块语音路由清理失败：" + err.Error()
+		a.agentAudioMu.Unlock()
+		return
+	}
+	a.moduleVoiceMu.Lock()
+	a.moduleVoiceRoute = false
+	a.moduleVoiceMu.Unlock()
 }
 
 func (a *app) startVoiceVerificationAudio(parent context.Context, sessionID string) {

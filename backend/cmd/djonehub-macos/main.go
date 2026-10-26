@@ -131,10 +131,15 @@ type app struct {
 	callMode          callModeStatus
 	callModeOperation bool
 
-	moduleVoiceMu       sync.Mutex
-	voiceUSBTransition  sync.RWMutex
-	moduleVoicePrepared bool
-	moduleVoiceRoute    bool
+	moduleVoiceMu                    sync.Mutex
+	voiceUSBTransition               sync.RWMutex
+	moduleVoicePrepared              bool
+	moduleVoiceRoute                 bool
+	moduleVoiceAutoStart             bool
+	moduleVoiceRouteStart            func(string) error
+	moduleVoiceRouteStop             func(string) error
+	moduleVoiceRouteAttemptedSession string
+	moduleVoiceRouteLastError        string
 
 	// 来电事件缓存（URC 驱动），供通话状态查询在 CLCC 失败/无条目时兜底
 	callMu          sync.Mutex
@@ -260,12 +265,14 @@ func main() {
 			usbDevice := discoverDJIUSBDevice()
 			usbATDevice, usbATErr := openDJIUSBAT()
 			instance := &app{
-				port:            "未发现 AT 串口",
-				discoveryError:  err.Error(),
-				usbDevice:       usbDevice,
-				usbAT:           usbATDevice,
-				smsPollInterval: 8 * time.Second,
-				smsReassembler:  smscodec.NewReassembler(),
+				voiceUSBTransition:   sync.RWMutex{},
+				moduleVoiceAutoStart: true,
+				port:                 "未发现 AT 串口",
+				discoveryError:       err.Error(),
+				usbDevice:            usbDevice,
+				usbAT:                usbATDevice,
+				smsPollInterval:      8 * time.Second,
+				smsReassembler:       smscodec.NewReassembler(),
 			}
 			if usbDevice != nil {
 				log.Printf("DJI USB device detected without AT serial port: %s %s (%s:%s)",
@@ -306,7 +313,7 @@ func main() {
 		log.Fatalf("create modem manager: %v", err)
 	}
 
-	instance := &app{modem: manager, port: port, smsPollInterval: 8 * time.Second}
+	instance := &app{modem: manager, port: port, smsPollInterval: 8 * time.Second, moduleVoiceAutoStart: true}
 	manager.SetSMSCallback(instance.recordSMS)
 	manager.SetRingCallback(instance.onURCRing)
 	manager.SetClipCallback(instance.onURCClip)
