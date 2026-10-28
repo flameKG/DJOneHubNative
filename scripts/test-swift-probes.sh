@@ -39,10 +39,20 @@ swiftc -parse-as-library \
   -o "$PROBE_ROOT/runtime-diagnostics"
 "$PROBE_ROOT/runtime-diagnostics"
 
+swiftc -parse-as-library -D STRUCTURED_DIAGNOSTICS_PROBE \
+  app/Sources/Models.swift \
+  app/Sources/RuntimeDiagnostics.swift \
+  app/Sources/StructuredDiagnostics.swift \
+  app/Sources/SecureDiagnosticEventFile.swift \
+  app/Sources/StructuredDiagnosticLogStore.swift \
+  app/Tests/StructuredDiagnosticsProbe/main.swift \
+  -o "$PROBE_ROOT/structured-diagnostics"
+"$PROBE_ROOT/structured-diagnostics"
+
 swiftc -parse-as-library \
   app/Sources/PermissionCenter.swift \
   app/Tests/PermissionCenterProbe/main.swift \
   -o "$PROBE_ROOT/permission-center"
 "$PROBE_ROOT/permission-center"
 
-log "Swift 策略、权限、诊断与迁移探针全部通过"
+log "Swift 策略、权限、结构化诊断与迁移探针全部通过"

@@ -40,11 +40,41 @@ struct RuntimeDiagnosticsSnapshot: Equatable {
             "生成时间：\(formatter.string(from: generatedAt))",
             "总体状态：\(overallLevel.displayName)",
         ]
-        lines.append(contentsOf: items.map {
-            "[\($0.level.displayName)] \($0.title)：\($0.summary)\($0.detail.isEmpty ? "" : " · \($0.detail)")"
-        })
-        lines.append("隐私说明：报告不包含电话号码、设备标识、会话 ID、转写内容或验证码。")
+        lines.append(contentsOf: items.compactMap { Self.safeReportLine(for: $0) })
+        lines.append("隐私说明：报告仅包含固定组件名称、状态级别与经过格式校验的非敏感计数，不包含自由文本或业务数据。")
         return lines.joined(separator: "\n")
+    }
+
+    private static func safeReportLine(for item: RuntimeDiagnosticItem) -> String? {
+        guard let title = safeReportTitle(for: item.id) else { return nil }
+        var line = "[\(item.level.displayName)] \(title)"
+        guard item.id == "pcm-capture" else { return line }
+
+        let parts = item.detail.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count == 5,
+              parts[1] == "帧",
+              parts[2] == "·",
+              parts[3] == "非零",
+              parts[0].allSatisfy(\.isNumber),
+              parts[4].allSatisfy(\.isNumber) else { return line }
+        line += "：\(parts[0]) 帧 · 非零 \(parts[4])"
+        return line
+    }
+
+    private static func safeReportTitle(for id: String) -> String? {
+        switch id {
+        case "service": return "后台服务"
+        case "module": return "蜂窝模块"
+        case "call-mode": return "通话模式"
+        case "call": return "蜂窝通话"
+        case "verification": return "一次性接听授权"
+        case "agent-transport": return "Agent PCM 传输"
+        case "agent-client": return "Agent 客户端"
+        case "module-io": return "模块音频 IO"
+        case "pcm-capture": return "PCM 采集"
+        case "asr": return "本地 ASR"
+        default: return nil
+        }
     }
 
     static func build(

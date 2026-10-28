@@ -41,6 +41,9 @@
 		D1A700000000000000000002 /* PermissionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000001 /* PermissionCenter.swift */; };
 		D1A700000000000000000004 /* SystemPermissionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000003 /* SystemPermissionCenter.swift */; };
 		D1A700000000000000000006 /* PermissionCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000005 /* PermissionCenterView.swift */; };
+		D1A800000000000000000002 /* StructuredDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A800000000000000000001 /* StructuredDiagnostics.swift */; };
+		D1A800000000000000000004 /* StructuredDiagnosticLogStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A800000000000000000003 /* StructuredDiagnosticLogStore.swift */; };
+		D1A800000000000000000006 /* SecureDiagnosticEventFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A800000000000000000005 /* SecureDiagnosticEventFile.swift */; };
 		CCDD69D5E523420BC2C5E3EE /* SMSStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5FE558AD4FEF1919375198D /* SMSStore.swift */; };
 		D17A5BEAA6B91E0CF4345CB7 /* AutoLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C9E1750A28B9B4C02C072B /* AutoLaunch.swift */; };
 		D3238E4E67EDAA6BCCA830B5 /* RoutingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A480439FB5558538B8B6E0 /* RoutingStore.swift */; };
@@ -86,6 +89,9 @@
 		D1A700000000000000000001 /* PermissionCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionCenter.swift; sourceTree = "<group>"; };
 		D1A700000000000000000003 /* SystemPermissionCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPermissionCenter.swift; sourceTree = "<group>"; };
 		D1A700000000000000000005 /* PermissionCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionCenterView.swift; sourceTree = "<group>"; };
+		D1A800000000000000000001 /* StructuredDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructuredDiagnostics.swift; sourceTree = "<group>"; };
+		D1A800000000000000000003 /* StructuredDiagnosticLogStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StructuredDiagnosticLogStore.swift; sourceTree = "<group>"; };
+		D1A800000000000000000005 /* SecureDiagnosticEventFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureDiagnosticEventFile.swift; sourceTree = "<group>"; };
 		DB45AD6AB93DBA1F357E5695 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DC11388FA67B835A55D6B961 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		E6A07D7E5C03CF4CC05E28A3 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
@@ -149,6 +155,9 @@
 				7B63FD8D7D1B1D51D06D23BD /* Ringtone.swift */,
 				D1A600000000000000000001 /* RuntimeDiagnostics.swift */,
 				D1A700000000000000000003 /* SystemPermissionCenter.swift */,
+				D1A800000000000000000003 /* StructuredDiagnosticLogStore.swift */,
+				D1A800000000000000000001 /* StructuredDiagnostics.swift */,
+				D1A800000000000000000005 /* SecureDiagnosticEventFile.swift */,
 				AA4E2ADFBEE34D33B207BBA4 /* RoutingModels.swift */,
 				C1A480439FB5558538B8B6E0 /* RoutingStore.swift */,
 				C5FE558AD4FEF1919375198D /* SMSStore.swift */,
@@ -334,6 +343,9 @@
 				D1A600000000000000000004 /* RuntimeDiagnosticsView.swift in Sources */,
 				D1A700000000000000000004 /* SystemPermissionCenter.swift in Sources */,
 				D1A700000000000000000006 /* PermissionCenterView.swift in Sources */,
+				D1A800000000000000000004 /* StructuredDiagnosticLogStore.swift in Sources */,
+				D1A800000000000000000002 /* StructuredDiagnostics.swift in Sources */,
+				D1A800000000000000000006 /* SecureDiagnosticEventFile.swift in Sources */,
 				A122D9632A78D37E4E440DBE /* Ringtone.swift in Sources */,
 				3F6C769CD04308BE9CA17D4E /* RoutingModels.swift in Sources */,
 				D3238E4E67EDAA6BCCA830B5 /* RoutingStore.swift in Sources */,

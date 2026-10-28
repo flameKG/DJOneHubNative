@@ -5,10 +5,12 @@ import UniformTypeIdentifiers
 struct RuntimeDiagnosticsView: View {
     @EnvironmentObject private var backend: BackendProcess
     @EnvironmentObject private var store: DashboardStore
+    @StateObject private var eventLog = StructuredDiagnosticLogStore.live()
 
     @State private var generatedAt = Date()
     @State private var exportError: String?
     @State private var copied = false
+    @State private var showingClearLogConfirmation = false
 
     private var snapshot: RuntimeDiagnosticsSnapshot {
         RuntimeDiagnosticsSnapshot.build(
@@ -33,7 +35,13 @@ struct RuntimeDiagnosticsView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     overallSummary
                     diagnosticRows
+                    structuredEvents
                     privacyNotice
+                    if let storageError = eventLog.storageError {
+                        Label(storageError, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                     if let exportError {
                         Label(exportError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -46,7 +54,23 @@ struct RuntimeDiagnosticsView: View {
             }
             .scrollIndicators(.visible)
         }
-        .onAppear { refreshAll() }
+        .onAppear {
+            eventLog.record(snapshot: snapshot)
+            refreshAll()
+        }
+        .onChange(of: snapshot) { updated in
+            eventLog.record(snapshot: updated)
+        }
+        .confirmationDialog(
+            "清空结构化诊断事件？",
+            isPresented: $showingClearLogConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("清空", role: .destructive) { eventLog.clear() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只会清除本机保存的隐私安全状态事件，不会修改模块、通话或 AI CLI 权限。")
+        }
     }
 
     private var header: some View {
@@ -67,7 +91,7 @@ struct RuntimeDiagnosticsView: View {
             Button {
                 exportReport()
             } label: {
-                Label("导出…", systemImage: "square.and.arrow.up")
+                Label("导出支持报告…", systemImage: "square.and.arrow.up")
             }
             .controlSize(.small)
             Button {
@@ -145,9 +169,63 @@ struct RuntimeDiagnosticsView: View {
         .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color(nsColor: .separatorColor)))
     }
 
+    private var structuredEvents: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("结构化事件")
+                        .font(.callout.weight(.semibold))
+                    Text("仅记录组件、状态级别与时间；最多保留 200 条。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Text("\(eventLog.events.count) 条")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Button("清空…", role: .destructive) {
+                    showingClearLogConfirmation = true
+                }
+                .controlSize(.small)
+                .disabled(eventLog.events.isEmpty)
+            }
+            .padding(14)
+
+            if eventLog.events.isEmpty {
+                Divider()
+                Text("暂无结构化事件")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ForEach(Array(eventLog.events.suffix(20).reversed())) { event in
+                    Divider().padding(.leading, 14)
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Text(event.timestamp.formatted(date: .omitted, time: .standard))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .frame(width: 78, alignment: .leading)
+                        Text(event.component.displayName)
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        Text(event.level.displayName)
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(eventColor(event.level))
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .accessibilityElement(children: .combine)
+                }
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color(nsColor: .separatorColor)))
+    }
+
     private var privacyNotice: some View {
         Label(
-            "复制和导出的摘要不包含电话号码、IMEI、ICCID、IMSI、会话 ID、转写内容或验证码。",
+            "支持报告只包含固定状态和结构化事件，不包含原始日志、电话号码、IMEI、ICCID、IMSI、会话 ID、转写内容、验证码或 Socket 路径。",
             systemImage: "lock.shield")
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -197,12 +275,13 @@ struct RuntimeDiagnosticsView: View {
 
     private func exportReport() {
         let panel = NSSavePanel()
-        panel.title = "导出运行诊断摘要"
-        panel.nameFieldStringValue = "Flame-DJ-Hub-Diagnostics.txt"
+        panel.title = "导出隐私安全支持报告"
+        panel.nameFieldStringValue = "Flame-DJ-Hub-Support-Report.txt"
         panel.allowedContentTypes = [.plainText]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
-            try snapshot.sanitizedReport.write(to: url, atomically: true, encoding: .utf8)
+            let report = PrivacySafeSupportReport.render(snapshot: snapshot, events: eventLog.events)
+            try report.write(to: url, atomically: true, encoding: .utf8)
             exportError = nil
         } catch {
             exportError = "导出失败：\(error.localizedDescription)"
@@ -219,6 +298,15 @@ struct RuntimeDiagnosticsView: View {
     }
 
     private func levelColor(_ level: RuntimeDiagnosticLevel) -> Color {
+        switch level {
+        case .healthy: return .green
+        case .warning: return .orange
+        case .critical: return .red
+        case .neutral: return .secondary
+        }
+    }
+
+    private func eventColor(_ level: DiagnosticEventLevel) -> Color {
         switch level {
         case .healthy: return .green
         case .warning: return .orange
