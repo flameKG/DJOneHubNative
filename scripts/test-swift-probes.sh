@@ -32,4 +32,11 @@ swiftc -parse-as-library \
   -o "$PROBE_ROOT/runtime-migration"
 "$PROBE_ROOT/runtime-migration"
 
-log "Swift 策略与迁移探针全部通过"
+swiftc -parse-as-library \
+  app/Sources/Models.swift \
+  app/Sources/RuntimeDiagnostics.swift \
+  app/Tests/RuntimeDiagnosticsProbe/main.swift \
+  -o "$PROBE_ROOT/runtime-diagnostics"
+"$PROBE_ROOT/runtime-diagnostics"
+
+log "Swift 策略、诊断与迁移探针全部通过"
