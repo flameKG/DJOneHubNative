@@ -71,7 +71,7 @@ type callModeRestoreNotice struct {
 func (a *app) callModeBackupDirectory() string {
 	base := a.dataDir
 	if base == "" {
-		base = filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "DJOneHubNative")
+		base = defaultAppSupportDirectory()
 	}
 	return filepath.Join(base, "module-backups")
 }
@@ -644,7 +644,6 @@ func (a *app) runCallModeRestore(backupID string) {
 		return
 	}
 	a.markUSBATDetached("call mode USB composition restore")
-	a.resetModuleVoiceState()
 
 	var lastErr error
 	for deadline := time.Now().Add(90 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Second) {

@@ -211,16 +211,24 @@ struct AgentAudioBridgeState: Equatable {
     var transportReady = false
     var moduleIOReady = false
     var clientConnected = false
+    var asrCompiled = false
+    var asrRunning = false
+    var asrError: String?
     var sessionNonce: Data?
     var lastError: String?
+
+    var asrAvailable: Bool {
+        asrCompiled && asrRunning && asrError == nil
+    }
 }
 
 final class AgentAudioBridge: @unchecked Sendable {
     static let shared: AgentAudioBridge = {
-        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("DJOneHubNative", isDirectory: true)
-        return AgentAudioBridge(socketPath: support.appendingPathComponent("agent-audio.sock").path,
-                                moduleIO: CoreAudioAgentModuleAudioIO())
+        let socketPath = FlameRuntimePaths.prepareSupportDirectory()
+            .appendingPathComponent(FlameRuntimePaths.agentAudioSocketName).path
+        return AgentAudioBridge(
+            socketPath: socketPath,
+            moduleIO: CoreAudioAgentModuleAudioIO())
     }()
 
     let socketPath: String
@@ -249,6 +257,9 @@ final class AgentAudioBridge: @unchecked Sendable {
         lock.withLock {
             self.server = server
             state.transportReady = true
+            if #available(macOS 27.0, *) {
+                state.asrCompiled = true
+            }
             state.lastError = nil
         }
         publishState()
@@ -419,23 +430,38 @@ final class AgentAudioBridge: @unchecked Sendable {
                   let session: NativeTranscriptSession = try? await APIClient(timeoutInterval: 5).get("api/agent/audio/status"),
                   let sessionID = session.captureSessionID?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !sessionID.isEmpty else { return }
-            let transcriber = NativeSpeechTranscriber { [weak self] text, isFinal in
-                self?.onNativeTranscript?(text, isFinal)
-                Task { await Self.reportNativeTranscript(text: text, isFinal: isFinal, sessionID: sessionID) }
-            }
+            let transcriber = NativeSpeechTranscriber(
+                onResult: { [weak self] text, isFinal in
+                    self?.onNativeTranscript?(text, isFinal)
+                    Task { await Self.reportNativeTranscript(text: text, isFinal: isFinal, sessionID: sessionID) }
+                },
+                onError: { [weak self] message in
+                    self?.nativeTranscriberFailed(generation: generation, message: message)
+                })
             guard self.lock.withLock({ self.moduleIOGeneration == generation }) else { return }
             do {
                 try await transcriber.start()
             } catch {
+                let changed = self.lock.withLock { () -> Bool in
+                    guard self.moduleIOGeneration == generation else { return false }
+                    self.state.asrRunning = false
+                    self.state.asrError = error.localizedDescription
+                    return true
+                }
+                if changed { self.publishState() }
                 return
             }
             let installed = self.lock.withLock { () -> Bool in
                 guard self.moduleIOGeneration == generation, self.nativeTranscriber == nil else { return false }
                 self.nativeTranscriber = transcriber
+                self.state.asrRunning = true
+                self.state.asrError = nil
                 return true
             }
             if !installed {
                 await transcriber.stop()
+            } else {
+                self.publishState()
             }
         }
     }
@@ -445,9 +471,22 @@ final class AgentAudioBridge: @unchecked Sendable {
         let transcriber = lock.withLock { () -> NativeSpeechTranscriber? in
             let value = nativeTranscriber as? NativeSpeechTranscriber
             nativeTranscriber = nil
+            state.asrRunning = false
             return value
         }
         Task { await transcriber?.stop() }
+        publishState()
+    }
+
+    private func nativeTranscriberFailed(generation: UInt64, message: String) {
+        let changed = lock.withLock { () -> Bool in
+            guard moduleIOGeneration == generation else { return false }
+            state.asrRunning = false
+            state.asrError = message
+            nativeTranscriber = nil
+            return true
+        }
+        if changed { publishState() }
     }
 
     private struct NativeTranscriptUpdate: Encodable {

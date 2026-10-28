@@ -52,6 +52,9 @@ type agentAudioState struct {
 	CaptureError          string           `json:"capture_error,omitempty"`
 	LastCapture           *captureMetrics  `json:"last_capture,omitempty"`
 	ASRAvailable          bool             `json:"asr_available"`
+	ASRCompiled           bool             `json:"asr_compiled"`
+	ASRRunning            bool             `json:"asr_running"`
+	ASRError              string           `json:"asr_error,omitempty"`
 	TTSAvailable          bool             `json:"tts_available"`
 	Format                agentAudioFormat `json:"format"`
 	Error                 string           `json:"error,omitempty"`
@@ -68,6 +71,9 @@ type agentAudioTransportUpdate struct {
 	ModuleIOReady   bool   `json:"module_io_ready"`
 	SocketPath      string `json:"socket_path"`
 	ClientConnected bool   `json:"client_connected"`
+	ASRCompiled     bool   `json:"asr_compiled"`
+	ASRRunning      bool   `json:"asr_running"`
+	ASRError        string `json:"asr_error"`
 	Error           string `json:"error"`
 }
 
@@ -134,9 +140,8 @@ func (a *app) agentAudioSnapshot() agentAudioState {
 	a.agentAudioMu.Unlock()
 	state.Format = fixedAgentAudioFormat()
 	state.PCMTransportAvailable = state.Compiled && state.TransportReady && strings.TrimSpace(state.SocketPath) != ""
-	state.VoiceAgentAvailable = state.PCMTransportAvailable && state.ModuleIOReady
-	state.ASRAvailable = strings.TrimSpace(state.Transcript) != "" ||
-		(state.LastCapture != nil && strings.TrimSpace(state.LastCapture.Transcript) != "")
+	state.VoiceAgentAvailable = state.PCMTransportAvailable && state.ClientConnected && state.ModuleIOReady
+	state.ASRAvailable = state.ASRCompiled && state.ASRRunning && strings.TrimSpace(state.ASRError) == ""
 	state.TTSAvailable = false
 	if !state.VoiceAgentAvailable {
 		state.Active = false
@@ -170,7 +175,10 @@ func (a *app) agentAudioTransport(w http.ResponseWriter, r *http.Request) {
 	a.agentAudio.ModuleIOReady = update.ModuleIOReady
 	a.agentAudio.SocketPath = update.SocketPath
 	a.agentAudio.ClientConnected = update.ClientConnected
-	a.agentAudio.Active = a.agentAudio.Active && update.Compiled && update.TransportReady && update.ModuleIOReady
+	a.agentAudio.ASRCompiled = update.ASRCompiled
+	a.agentAudio.ASRRunning = update.ASRRunning
+	a.agentAudio.ASRError = strings.TrimSpace(update.ASRError)
+	a.agentAudio.Active = a.agentAudio.Active && update.Compiled && update.TransportReady && update.ClientConnected && update.ModuleIOReady
 	a.agentAudio.Error = strings.TrimSpace(update.Error)
 	a.agentAudioMu.Unlock()
 	if previousTransportReady && (!update.Compiled || !update.TransportReady || previousSocket != update.SocketPath) {

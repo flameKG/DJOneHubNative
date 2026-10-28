@@ -305,9 +305,14 @@ func TestSafeRouteTeardownBlocksAuthorizedReconcileUntilNativeStops(t *testing.T
 func TestStaleRouteStartCannotCommitAfterTeardown(t *testing.T) {
 	settleEntered := make(chan struct{})
 	releaseSettle := make(chan struct{})
+	var stops atomic.Int32
 	instance := &app{
 		moduleVoiceAutoStart:  true,
 		moduleVoiceRouteStart: func(string) error { return nil },
+		moduleVoiceRouteStop: func(string) error {
+			stops.Add(1)
+			return nil
+		},
 		moduleVoiceRouteSettle: func() {
 			close(settleEntered)
 			<-releaseSettle
@@ -333,6 +338,9 @@ func TestStaleRouteStartCannotCommitAfterTeardown(t *testing.T) {
 	instance.moduleVoiceMu.Unlock()
 	if active {
 		t.Fatal("stale route start resurrected a route after teardown")
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("late starter side effect stops=%d want 1", stops.Load())
 	}
 }
 
@@ -443,5 +451,259 @@ func TestAuthorizedReconcilePreservesRecoveryExhaustionWhenPendingTeardownComple
 	}
 	if routeStarts.Load() != 0 || pcmStarts.Load() != 0 {
 		t.Fatalf("exhausted recovery restarted route/PCM: route=%d pcm=%d", routeStarts.Load(), pcmStarts.Load())
+	}
+}
+
+func TestModuleVoiceResetInvalidatesStartingStateForRetry(t *testing.T) {
+	settleEntered := make(chan struct{})
+	releaseSettle := make(chan struct{})
+	var starts atomic.Int32
+	var stops atomic.Int32
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { starts.Add(1); return nil },
+		moduleVoiceRouteStop:  func(string) error { stops.Add(1); return nil },
+		moduleVoiceRouteSettle: func() {
+			if starts.Load() == 1 {
+				close(settleEntered)
+				<-releaseSettle
+			}
+		},
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- instance.ensureModuleVoiceRoute("old-session") }()
+	<-settleEntered
+	instance.resetModuleVoiceState()
+	if err := instance.ensureModuleVoiceRoute("new-session"); !errors.Is(err, errModuleVoiceStartInProgress) {
+		t.Fatalf("replacement start was not blocked by stale starter: %v", err)
+	}
+	if starts.Load() != 1 {
+		t.Fatalf("replacement started before stale starter cleanup: starts=%d", starts.Load())
+	}
+	close(releaseSettle)
+	if err := <-firstDone; !errors.Is(err, errModuleVoiceTeardownInProgress) {
+		t.Fatalf("stale start error=%v", err)
+	}
+	if err := instance.ensureModuleVoiceRoute("new-session"); err != nil {
+		t.Fatalf("retry after reset failed: %v", err)
+	}
+	if starts.Load() != 2 {
+		t.Fatalf("starts=%d want 2", starts.Load())
+	}
+	if stops.Load() != 1 {
+		t.Fatalf("stale reset route side effect stops=%d want 1", stops.Load())
+	}
+}
+
+func TestSafeTeardownClearsCommittedOwnerBeforeNextPrewarm(t *testing.T) {
+	var starts atomic.Int32
+	var stops atomic.Int32
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { starts.Add(1); return nil },
+		moduleVoiceRouteStop:  func(string) error { stops.Add(1); return nil },
+	}
+	instance.moduleVoiceRoute = true
+	instance.moduleVoiceRouteOwnerSession = "old-session"
+	instance.moduleVoiceRouteOwnerGeneration = 7
+	if err := instance.stopModuleVoiceRouteSafely(time.Second); err != nil {
+		t.Fatalf("safe teardown failed: %v", err)
+	}
+	ownership, err := instance.ensureModuleVoiceRouteOwned("new-session")
+	if err != nil {
+		t.Fatalf("new prewarm failed: %v", err)
+	}
+	if err := instance.rollbackOwnedModuleVoiceRoute(ownership); err != nil {
+		t.Fatalf("new prewarm rollback failed: %v", err)
+	}
+	if starts.Load() != 1 || stops.Load() != 2 {
+		t.Fatalf("starts=%d stops=%d want 1,2", starts.Load(), stops.Load())
+	}
+}
+
+func TestOwnedRollbackBlocksReplacementUntilStopCompletes(t *testing.T) {
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { return nil },
+		moduleVoiceRouteStop: func(string) error {
+			close(stopEntered)
+			<-releaseStop
+			return nil
+		},
+	}
+	instance.moduleVoiceRoute = true
+	instance.moduleVoiceRouteAttemptedSession = "old-session"
+	instance.moduleVoiceRoutePendingOwner = 1
+	ownership := moduleVoiceRouteOwnership{created: true, generation: 1, sessionID: "old-session"}
+	rollbackDone := make(chan error, 1)
+	go func() { rollbackDone <- instance.rollbackOwnedModuleVoiceRoute(ownership) }()
+	<-stopEntered
+	if _, err := instance.ensureModuleVoiceRouteOwned("new-session"); !errors.Is(err, errModuleVoiceTeardownInProgress) {
+		t.Fatalf("replacement was not blocked during owned rollback: %v", err)
+	}
+	close(releaseStop)
+	if err := <-rollbackDone; err != nil {
+		t.Fatalf("owned rollback failed: %v", err)
+	}
+	newOwnership, err := instance.ensureModuleVoiceRouteOwned("new-session")
+	if err != nil {
+		t.Fatalf("replacement did not start after rollback: %v", err)
+	}
+	instance.commitModuleVoiceRouteOwnership(newOwnership)
+	instance.moduleVoiceMu.Lock()
+	defer instance.moduleVoiceMu.Unlock()
+	if !instance.moduleVoiceRoute || instance.moduleVoiceRouteOwnerSession != "new-session" || instance.moduleVoiceRouteOwnerGeneration != newOwnership.generation {
+		t.Fatalf("replacement route was not preserved: active=%v owner=%q generation=%d", instance.moduleVoiceRoute, instance.moduleVoiceRouteOwnerSession, instance.moduleVoiceRouteOwnerGeneration)
+	}
+}
+
+func TestOwnedRollbackWaitsForNativeStopAndCanRetryAfterStopFailure(t *testing.T) {
+	var stops atomic.Int32
+	instance := &app{moduleVoiceRouteStop: func(string) error {
+		if stops.Add(1) == 1 {
+			return errors.New("stop failed")
+		}
+		return nil
+	}}
+	instance.moduleVoiceRoute = true
+	instance.agentAudio = agentAudioState{ClientConnected: true, ModuleIOReady: true}
+	ownership := moduleVoiceRouteOwnership{created: true, generation: 1, sessionID: "s"}
+	instance.moduleVoiceTransitionGeneration = 1
+	instance.moduleVoiceRouteAttemptedSession = "s"
+	if err := instance.rollbackOwnedModuleVoiceRoute(ownership); err == nil {
+		t.Fatal("expected native stop timeout")
+	}
+	if stops.Load() != 0 {
+		t.Fatalf("stopper called while native audio active: %d", stops.Load())
+	}
+	instance.agentAudioMu.Lock()
+	instance.agentAudio.ClientConnected = false
+	instance.agentAudio.ModuleIOReady = false
+	instance.agentAudioMu.Unlock()
+	if err := instance.rollbackOwnedModuleVoiceRoute(ownership); err == nil {
+		t.Fatal("expected stopper failure")
+	}
+	if err := instance.rollbackOwnedModuleVoiceRoute(ownership); err != nil {
+		t.Fatalf("retry rollback failed: %v", err)
+	}
+}
+
+func TestSuccessfulRecoveryClearsOldOwnerBeforeReplacementRollback(t *testing.T) {
+	var starts atomic.Int32
+	var stops atomic.Int32
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { starts.Add(1); return nil },
+		moduleVoiceRouteStop:  func(string) error { stops.Add(1); return nil },
+	}
+	instance.moduleVoiceRoute = true
+	instance.moduleVoiceRouteOwnerSession = "old-session"
+	instance.moduleVoiceRouteOwnerGeneration = 7
+	instance.moduleVoiceRecoverySession = "old-session"
+	instance.moduleVoiceRecoveryInProgress = true
+	instance.moduleVoiceRecoveryGeneration = 1
+	instance.moduleVoiceRecoveryActive = 1
+
+	if !instance.completeReservedModuleVoiceRecovery("old-session", 1) {
+		t.Fatal("recovery did not complete")
+	}
+	ownership, err := instance.ensureModuleVoiceRouteOwned("new-session")
+	if err != nil {
+		t.Fatalf("replacement start failed: %v", err)
+	}
+	if err := instance.rollbackOwnedModuleVoiceRoute(ownership); err != nil {
+		t.Fatalf("replacement rollback failed: %v", err)
+	}
+	if starts.Load() != 1 || stops.Load() != 2 {
+		t.Fatalf("starts=%d stops=%d want 1,2", starts.Load(), stops.Load())
+	}
+}
+
+func TestHardwareLossResetWaitsForTeardownBeforeReplacement(t *testing.T) {
+	stopEntered := make(chan struct{})
+	releaseStop := make(chan struct{})
+	var starts atomic.Int32
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { starts.Add(1); return nil },
+		moduleVoiceRouteStop: func(string) error {
+			close(stopEntered)
+			<-releaseStop
+			return nil
+		},
+	}
+	instance.moduleVoiceRoute = true
+	teardownDone := make(chan error, 1)
+	go func() { teardownDone <- instance.stopModuleVoiceRouteSafely(time.Second) }()
+	<-stopEntered
+
+	resetDone := make(chan struct{})
+	go func() {
+		instance.resetModuleVoiceStateAfterHardwareLoss()
+		close(resetDone)
+	}()
+	select {
+	case <-resetDone:
+		t.Fatal("hardware-loss reset released before the old teardown finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := instance.ensureModuleVoiceRouteOwned("new-session"); !errors.Is(err, errModuleVoiceTeardownInProgress) {
+		t.Fatalf("replacement was not blocked during hardware-loss reset: %v", err)
+	}
+	if starts.Load() != 0 {
+		t.Fatalf("replacement started before old teardown completed: %d", starts.Load())
+	}
+
+	close(releaseStop)
+	if err := <-teardownDone; err != nil {
+		t.Fatalf("old teardown failed: %v", err)
+	}
+	select {
+	case <-resetDone:
+	case <-time.After(time.Second):
+		t.Fatal("hardware-loss reset did not finish after teardown")
+	}
+	if _, err := instance.ensureModuleVoiceRouteOwned("new-session"); err != nil {
+		t.Fatalf("replacement did not start after teardown and reset: %v", err)
+	}
+	if starts.Load() != 1 {
+		t.Fatalf("replacement starts=%d want=1", starts.Load())
+	}
+}
+
+func TestHardwareLossResetPreservesStaleStarterUntilRollback(t *testing.T) {
+	settleEntered := make(chan struct{})
+	releaseSettle := make(chan struct{})
+	var starts atomic.Int32
+	var stops atomic.Int32
+	instance := &app{
+		moduleVoiceAutoStart:  true,
+		moduleVoiceRouteStart: func(string) error { starts.Add(1); return nil },
+		moduleVoiceRouteStop:  func(string) error { stops.Add(1); return nil },
+		moduleVoiceRouteSettle: func() {
+			if starts.Load() == 1 {
+				close(settleEntered)
+				<-releaseSettle
+			}
+		},
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- instance.ensureModuleVoiceRoute("old-session") }()
+	<-settleEntered
+	instance.resetModuleVoiceStateAfterHardwareLoss()
+	if err := instance.ensureModuleVoiceRoute("new-session"); !errors.Is(err, errModuleVoiceStartInProgress) {
+		t.Fatalf("replacement was not blocked by stale starter: %v", err)
+	}
+	close(releaseSettle)
+	if err := <-firstDone; !errors.Is(err, errModuleVoiceTeardownInProgress) {
+		t.Fatalf("stale starter error=%v", err)
+	}
+	if err := instance.ensureModuleVoiceRoute("new-session"); err != nil {
+		t.Fatalf("replacement failed after stale rollback: %v", err)
+	}
+	if starts.Load() != 2 || stops.Load() != 1 {
+		t.Fatalf("starts=%d stops=%d want 2,1", starts.Load(), stops.Load())
 	}
 }

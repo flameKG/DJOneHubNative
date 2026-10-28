@@ -171,6 +171,9 @@ func (a *app) stopModuleVoiceRouteConfirmed(preserveRecoveryExhausted bool) erro
 	}
 	a.moduleVoiceMu.Unlock()
 	if !active {
+		a.moduleVoiceMu.Lock()
+		a.clearStoppedModuleVoiceRouteLocked()
+		a.moduleVoiceMu.Unlock()
 		return nil
 	}
 	if stopper == nil {
@@ -180,9 +183,20 @@ func (a *app) stopModuleVoiceRouteConfirmed(preserveRecoveryExhausted bool) erro
 		return err
 	}
 	a.moduleVoiceMu.Lock()
-	a.moduleVoiceRoute = false
+	a.clearStoppedModuleVoiceRouteLocked()
 	a.moduleVoiceMu.Unlock()
 	return nil
+}
+
+func (a *app) clearStoppedModuleVoiceRouteLocked() {
+	a.moduleVoiceRoute = false
+	a.moduleVoiceRouteOwnerSession = ""
+	a.moduleVoiceRouteOwnerGeneration = 0
+	a.moduleVoiceRoutePendingOwner = 0
+	if !a.moduleVoiceRouteStarting {
+		a.moduleVoiceRouteAttemptedSession = ""
+		a.moduleVoiceRouteLastError = ""
+	}
 }
 
 func (a *app) waitForNativeModuleAudioStop(timeout time.Duration) error {
@@ -197,13 +211,19 @@ func (a *app) waitForNativeModuleAudioStop(timeout time.Duration) error {
 }
 
 type moduleVoiceRouteOwnership struct {
-	created    bool
-	generation uint64
-	sessionID  string
+	created         bool
+	generation      uint64
+	resetGeneration uint64
+	sessionID       string
 }
 
 func (a *app) ensureModuleVoiceRoute(sessionID string) error {
-	_, err := a.ensureModuleVoiceRouteOwned(sessionID)
+	ownership, err := a.ensureModuleVoiceRouteOwned(sessionID)
+	if err != nil && ownership.created {
+		if cleanupErr := a.rollbackOwnedModuleVoiceRoute(ownership); cleanupErr != nil {
+			return errors.Join(err, cleanupErr)
+		}
+	}
 	return err
 }
 
@@ -243,7 +263,8 @@ func (a *app) ensureModuleVoiceRouteOwned(sessionID string) (moduleVoiceRouteOwn
 	transitionGeneration := a.moduleVoiceTransitionGeneration
 	a.moduleVoiceRouteStarting = true
 	a.moduleVoiceRouteStartGeneration = transitionGeneration
-	ownership := moduleVoiceRouteOwnership{created: true, generation: transitionGeneration, sessionID: sessionID}
+	resetGeneration := a.moduleVoiceResetGeneration
+	ownership := moduleVoiceRouteOwnership{created: true, generation: transitionGeneration, resetGeneration: resetGeneration, sessionID: sessionID}
 	starter := a.moduleVoiceRouteStart
 	usesProductionStarter := starter == nil
 	settle := a.moduleVoiceRouteSettle
@@ -255,8 +276,11 @@ func (a *app) ensureModuleVoiceRouteOwned(sessionID string) (moduleVoiceRouteOwn
 	a.moduleVoiceMu.Unlock()
 	if err := starter(a.runtimeDirectory()); err != nil {
 		a.moduleVoiceMu.Lock()
-		if a.moduleVoiceTransitionGeneration == transitionGeneration && !a.moduleVoiceTeardownInProgress {
+		if a.moduleVoiceRouteStartGeneration == transitionGeneration {
 			a.moduleVoiceRouteStarting = false
+			a.moduleVoiceRouteStartGeneration = 0
+		}
+		if a.moduleVoiceTransitionGeneration == transitionGeneration && !a.moduleVoiceTeardownInProgress {
 			a.moduleVoiceRouteLastError = err.Error()
 		}
 		a.moduleVoiceMu.Unlock()
@@ -273,11 +297,35 @@ func (a *app) ensureModuleVoiceRouteOwned(sessionID string) (moduleVoiceRouteOwn
 	}
 	a.moduleVoiceMu.Lock()
 	if a.moduleVoiceTeardownInProgress || a.moduleVoiceTransitionGeneration != transitionGeneration {
+		if a.moduleVoiceResetGeneration != resetGeneration {
+			if a.moduleVoiceRouteStartGeneration != transitionGeneration {
+				a.moduleVoiceMu.Unlock()
+				return ownership, errModuleVoiceTeardownInProgress
+			}
+			a.moduleVoiceRoute = true
+			a.moduleVoiceRouteStarting = false
+			a.moduleVoiceRouteStartGeneration = 0
+			a.moduleVoiceRoutePendingOwner = transitionGeneration
+			a.moduleVoiceTeardownInProgress = true
+			a.moduleVoiceMu.Unlock()
+			return ownership, errModuleVoiceTeardownInProgress
+		}
+		// The starter already succeeded, so the module has a real route side
+		// effect even though this transition can no longer commit. Keep the
+		// exact owner generation and block replacement starts until its caller
+		// rolls the route back safely.
+		a.moduleVoiceRoute = true
+		a.moduleVoiceRouteStarting = false
+		a.moduleVoiceRouteStartGeneration = 0
+		a.moduleVoiceRoutePendingOwner = transitionGeneration
+		a.moduleVoiceTeardownInProgress = true
 		a.moduleVoiceMu.Unlock()
 		return ownership, errModuleVoiceTeardownInProgress
 	}
 	a.moduleVoiceRoute = true
 	a.moduleVoiceRouteStarting = false
+	a.moduleVoiceRouteStartGeneration = 0
+	a.moduleVoiceRoutePendingOwner = transitionGeneration
 	a.moduleVoiceRouteLastError = ""
 	a.moduleVoiceMu.Unlock()
 	return ownership, nil
@@ -287,36 +335,70 @@ func (a *app) rollbackOwnedModuleVoiceRoute(ownership moduleVoiceRouteOwnership)
 	if !ownership.created {
 		return nil
 	}
-	a.moduleVoiceTeardownMu.Lock()
+	deadline := time.Now().Add(2 * time.Second)
+	if !tryLockMutexUntil(&a.moduleVoiceTeardownMu, deadline) {
+		return errors.New("模块语音路由已有清理操作尚未结束")
+	}
 	defer a.moduleVoiceTeardownMu.Unlock()
 
-	a.moduleVoiceMu.Lock()
-	ownsCurrentTransition := a.moduleVoiceTransitionGeneration == ownership.generation
-	ownsInvalidatedStarter := a.moduleVoiceRouteStarting && a.moduleVoiceRouteStartGeneration == ownership.generation && a.moduleVoiceRouteAttemptedSession == ownership.sessionID
-	if !ownsCurrentTransition && !ownsInvalidatedStarter {
+	if !tryLockMutexUntil(&a.moduleVoiceMu, deadline) {
+		return errors.New("模块语音路由状态切换尚未结束")
+	}
+	if a.moduleVoiceRouteOwnerGeneration != 0 && (a.moduleVoiceRouteOwnerGeneration != ownership.generation || a.moduleVoiceRouteOwnerSession != ownership.sessionID) {
 		a.moduleVoiceMu.Unlock()
 		return nil
 	}
+	ownsCurrentTransition := a.moduleVoiceTransitionGeneration == ownership.generation
+	ownsInvalidatedStarter := a.moduleVoiceRouteStarting && a.moduleVoiceRouteStartGeneration == ownership.generation && a.moduleVoiceRouteAttemptedSession == ownership.sessionID
+	pendingRollback := a.moduleVoiceRoutePendingOwner == ownership.generation && a.moduleVoiceRouteAttemptedSession == ownership.sessionID
+	if !ownsCurrentTransition && !ownsInvalidatedStarter && !pendingRollback {
+		a.moduleVoiceMu.Unlock()
+		return nil
+	}
+	if ownsInvalidatedStarter || ownsCurrentTransition {
+		a.moduleVoiceRoute = true
+		a.moduleVoiceRoutePendingOwner = ownership.generation
+	}
 	a.moduleVoiceTeardownInProgress = true
 	a.moduleVoiceTransitionGeneration++
-	stopper := a.moduleVoiceRouteStop
 	a.moduleVoiceMu.Unlock()
-	if stopper == nil {
-		stopper = func(directory string) error { return a.stopModuleVoiceRoute(directory) }
+
+	a.stopVoiceVerificationAudio()
+	remaining := time.Until(deadline)
+	if remaining < 0 {
+		remaining = 0
 	}
-	err := stopper(a.runtimeDirectory())
+	if err := a.waitForNativeModuleAudioStop(remaining); err != nil {
+		a.moduleVoiceMu.Lock()
+		a.moduleVoiceRouteLastError = err.Error()
+		a.moduleVoiceMu.Unlock()
+		return err
+	}
+	if err := a.stopModuleVoiceRouteConfirmed(false); err != nil {
+		a.moduleVoiceMu.Lock()
+		a.moduleVoiceRouteLastError = err.Error()
+		a.moduleVoiceMu.Unlock()
+		return err
+	}
 	a.moduleVoiceMu.Lock()
-	a.moduleVoiceRouteStarting = false
-	if err == nil {
-		a.moduleVoiceRoute = false
+	a.moduleVoiceTeardownInProgress = false
+	a.moduleVoiceMu.Unlock()
+	return nil
+}
+
+func (a *app) commitModuleVoiceRouteOwnership(ownership moduleVoiceRouteOwnership) {
+	if !ownership.created {
+		return
+	}
+	a.moduleVoiceMu.Lock()
+	defer a.moduleVoiceMu.Unlock()
+	if a.moduleVoiceRoute && a.moduleVoiceRoutePendingOwner == ownership.generation {
+		a.moduleVoiceRouteOwnerSession = ownership.sessionID
+		a.moduleVoiceRouteOwnerGeneration = ownership.generation
+		a.moduleVoiceRoutePendingOwner = 0
 		a.moduleVoiceRouteAttemptedSession = ""
 		a.moduleVoiceRouteLastError = ""
-		a.moduleVoiceTeardownInProgress = false
-	} else {
-		a.moduleVoiceRouteLastError = err.Error()
 	}
-	a.moduleVoiceMu.Unlock()
-	return err
 }
 
 func isRecoverableModuleIOError(err error) bool {
@@ -374,7 +456,7 @@ func (a *app) completeReservedModuleVoiceRecovery(sessionID string, generation u
 	if recoveryErr == nil && ownsRecovery {
 		// A replacement route cannot start while recovery is in progress, so the
 		// route stopped by this owner is still the old route even if invalidated.
-		a.moduleVoiceRoute = false
+		a.clearStoppedModuleVoiceRouteLocked()
 	}
 	if recoveryErr == nil && validRecovery {
 		a.moduleVoiceRouteAttemptedSession = ""

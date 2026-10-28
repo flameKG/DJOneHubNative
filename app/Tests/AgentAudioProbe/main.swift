@@ -76,6 +76,7 @@ func testAudioOwnershipMutualExclusion() {
 final class FakeModuleIO: AgentModuleAudioIO {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
     var downlink: (() -> Data)?
     var uplink: ((Data) -> Void)?
     var starts = 0
@@ -89,6 +90,7 @@ final class FakeModuleIO: AgentModuleAudioIO {
 final class ReadyThenFailModuleIO: AgentModuleAudioIO {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
     func start(pullDownlink: @escaping () -> Data, pushUplink: @escaping (Data) -> Void) throws {
         onReady?()
         throw AgentAudioError.socketFailure("second endpoint failed")
@@ -99,6 +101,7 @@ final class ReadyThenFailModuleIO: AgentModuleAudioIO {
 final class BlockingFirstStartModuleIO: AgentModuleAudioIO {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
     let firstStartEntered = DispatchSemaphore(value: 0)
     let releaseFirstStart = DispatchSemaphore(value: 0)
     private let lock = NSLock()
@@ -125,6 +128,7 @@ final class BlockingFirstStartModuleIO: AgentModuleAudioIO {
 final class BlockingFirstStopModuleIO: AgentModuleAudioIO {
     var onReady: (() -> Void)?
     var onUnavailable: (() -> Void)?
+    var onCapturePCM: ((Data) -> Void)?
     let firstStopEntered = DispatchSemaphore(value: 0)
     let releaseFirstStop = DispatchSemaphore(value: 0)
     private let lock = NSLock()

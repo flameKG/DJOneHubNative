@@ -26,7 +26,7 @@ func TestAgentAudioTranscriptStoresAndExtractsCodeThenClearsOnStop(t *testing.T)
 	if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
 		t.Fatal(err)
 	}
-	if state.Transcript != "验证码是 一 二 三 四" || !state.TranscriptFinal || state.VerificationCode != "1234" || !state.ASRAvailable {
+	if state.Transcript != "验证码是 一 二 三 四" || !state.TranscriptFinal || state.VerificationCode != "1234" || state.ASRAvailable {
 		t.Fatalf("unexpected transcript state=%+v", state)
 	}
 	instance.agentAudioMu.Lock()

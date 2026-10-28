@@ -149,11 +149,7 @@ func cliAccessConfigPath() string {
 	if path := strings.TrimSpace(os.Getenv(cliConfigEnvironment)); path != "" {
 		return path
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(home, "Library", "Application Support", "DJOneHubNative", "cli-access.json")
+	return filepath.Join(defaultAppSupportDirectory(), "cli-access.json")
 }
 
 func loadCLIAccessConfig(path string) (cliAccessConfig, error) {
@@ -279,6 +275,9 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		{Name: "call.dial", RequiredScope: "call.dial", Mutating: true, Confirmation: true},
 		{Name: "call.answer", RequiredScope: "call.answer", Mutating: true, Confirmation: true},
 		{Name: "call.hangup", RequiredScope: "call.hangup", Mutating: true},
+		{Name: "call.voice-verification.status", RequiredScope: "call.read"},
+		{Name: "call.voice-verification.arm", RequiredScope: "call.answer", Mutating: true, Confirmation: true},
+		{Name: "call.voice-verification.disarm", RequiredScope: "call.answer", Mutating: true, Confirmation: true},
 		{Name: "call.agent_audio.status", RequiredScope: "call.agent_audio"},
 		{Name: "call.agent_audio.start", RequiredScope: "call.agent_audio", Mutating: true, Confirmation: true},
 		{Name: "call.agent_audio.stop", RequiredScope: "call.agent_audio", Mutating: true, Confirmation: true},
@@ -301,7 +300,11 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 		"scopes":       scopes,
 		"capabilities": definitions,
 		"safety": map[string]any{
-			"idempotency_required":          []string{"sms.send", "call.dial", "call.answer", "call.hangup", "call.agent_audio.start", "call.agent_audio.stop", "esim.switch"},
+			"idempotency_required": []string{
+				"sms.send", "call.dial", "call.answer", "call.hangup",
+				"call.voice-verification.arm", "call.voice-verification.disarm",
+				"call.agent_audio.start", "call.agent_audio.stop", "esim.switch",
+			},
 			"raw_at_available":              false,
 			"agent_pcm_transport_available": audio.PCMTransportAvailable,
 			"voice_agent_available":         audio.VoiceAgentAvailable,

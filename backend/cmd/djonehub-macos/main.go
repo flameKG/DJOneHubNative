@@ -146,6 +146,10 @@ type app struct {
 	moduleVoiceRouteSettle           func()
 	moduleVoiceRouteAttemptedSession string
 	moduleVoiceRouteLastError        string
+	moduleVoiceRouteOwnerSession     string
+	moduleVoiceRouteOwnerGeneration  uint64
+	moduleVoiceRoutePendingOwner     uint64
+	moduleVoiceResetGeneration       uint64
 	moduleVoiceRecoverySession       string
 	moduleVoiceRecoveryInProgress    bool
 	moduleVoiceRecoveryGeneration    uint64
@@ -833,7 +837,7 @@ func (a *app) markUSBATDetached(reason string) {
 	a.discoveryError = "DJI USB device is not connected"
 	a.usbATBackoffUntil = time.Now().Add(2 * time.Second)
 	a.usbATBackoffErr = reason
-	a.resetModuleVoiceState()
+	a.resetModuleVoiceStateAfterHardwareLoss()
 	if manager, _ := a.currentESIMManager(); manager != nil {
 		manager.NotifyModemReset()
 	}
@@ -1517,8 +1521,11 @@ func (ar *smsArchive) clear() {
 }
 
 func (a *app) initSMSArchive() {
-	dir := filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "DJOneHubNative")
-	_ = os.MkdirAll(dir, 0o700)
+	dir, err := prepareAppSupportDirectory()
+	if err != nil {
+		dir = defaultAppSupportDirectory()
+		_ = os.MkdirAll(dir, 0o700)
+	}
 	a.dataDir = dir
 	a.callMode = newCallModeStatus("checking", "正在检查通话模式")
 	a.callMode.RuntimePath = a.runtimeDirectory()

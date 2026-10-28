@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,7 +55,7 @@ func TestVoiceVerificationDisarmAndAgentAudioStopCancelCapture(t *testing.T) {
 		stop func(*app)
 	}{
 		{name: "disarm", stop: func(instance *app) { instance.disarmVoiceVerification() }},
-		{name: "rearm", stop: func(instance *app) { instance.armVoiceVerification(time.Minute, []string{"18742589885"}) }},
+		{name: "rearm", stop: func(instance *app) { instance.armVoiceVerification(time.Minute, []string{"10000000000"}) }},
 		{name: "agent audio stop", stop: func(instance *app) {
 			instance.agentAudioStop(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/agent/audio/stop", nil))
 		}},
@@ -188,16 +190,121 @@ func TestVoiceVerificationStartsPCMForAnsweredActiveCallAndStopsOnIdle(t *testin
 	}
 }
 
+func TestVoiceVerificationDisarmClearsSensitiveWindowMetadata(t *testing.T) {
+	instance := &app{}
+	instance.voiceVerification = &voiceVerificationWindow{
+		Active:          true,
+		ExpiresAt:       time.Now().Add(time.Minute),
+		AllowedNumbers:  []string{"10000000000"},
+		Answered:        true,
+		SessionID:       "session-sensitive",
+		Consumed:        true,
+		AudioAuthorized: true,
+		LastError:       "sensitive failure",
+		answering:       true,
+		attemptNumber:   "10000000000",
+		attemptSession:  "session-sensitive",
+		attemptCallID:   7,
+	}
+
+	instance.disarmVoiceVerification()
+	window := instance.voiceVerificationSnapshot()
+	if window.Active || !window.ExpiresAt.IsZero() || len(window.AllowedNumbers) != 0 || window.Answered || window.SessionID != "" || window.Consumed || window.AudioAuthorized || window.LastError != "" || window.answering || window.attemptNumber != "" || window.attemptSession != "" || window.attemptCallID != 0 {
+		t.Fatalf("disarm retained sensitive metadata: %+v", window)
+	}
+}
+
+func TestVoiceVerificationExpiryClearsSensitiveWindowMetadata(t *testing.T) {
+	instance := &app{}
+	instance.voiceVerification = &voiceVerificationWindow{
+		Active:          true,
+		ExpiresAt:       time.Now().Add(-time.Second),
+		AllowedNumbers:  []string{"10000000000"},
+		SessionID:       "session-sensitive",
+		Answered:        true,
+		Consumed:        true,
+		AudioAuthorized: true,
+		LastError:       "sensitive failure",
+		answering:       true,
+		attemptNumber:   "10000000000",
+		attemptSession:  "session-sensitive",
+		attemptCallID:   7,
+	}
+
+	window := instance.voiceVerificationSnapshot()
+	if window.Active || !window.ExpiresAt.IsZero() || len(window.AllowedNumbers) != 0 || window.SessionID != "" || window.Answered || window.Consumed || window.AudioAuthorized || window.LastError != "" || window.answering || window.attemptNumber != "" || window.attemptSession != "" || window.attemptCallID != 0 {
+		t.Fatalf("expiry retained sensitive metadata: %+v", window)
+	}
+}
+
+func TestVoiceVerificationAutomationProactivelyClearsExpiredSensitiveMetadata(t *testing.T) {
+	instance := &app{}
+	instance.voiceVerification = &voiceVerificationWindow{
+		Active:          true,
+		ExpiresAt:       time.Now().Add(50 * time.Millisecond),
+		AllowedNumbers:  []string{"10000000000"},
+		SessionID:       "session-sensitive",
+		Answered:        true,
+		Consumed:        true,
+		AudioAuthorized: true,
+		LastError:       "sensitive failure",
+		answering:       true,
+		attemptNumber:   "10000000000",
+		attemptSession:  "session-sensitive",
+		attemptCallID:   7,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		instance.runVoiceVerificationAutomation(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		instance.voiceVerificationMu.Lock()
+		window := *instance.voiceVerification
+		instance.voiceVerificationMu.Unlock()
+		if !window.Active && window.ExpiresAt.IsZero() && len(window.AllowedNumbers) == 0 && window.SessionID == "" && !window.Answered && !window.Consumed && !window.AudioAuthorized && window.LastError == "" && !window.answering && window.attemptNumber == "" && window.attemptSession == "" && window.attemptCallID == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	instance.voiceVerificationMu.Lock()
+	window := *instance.voiceVerification
+	instance.voiceVerificationMu.Unlock()
+	t.Fatalf("automation did not proactively clear expired sensitive metadata: %+v", window)
+}
+
+func TestVoiceVerificationInactiveJSONOmitsExpiredMetadata(t *testing.T) {
+	window := voiceVerificationWindow{AllowedNumbers: nil}
+	encoded, err := json.Marshal(window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, `"expires_at"`) || strings.Contains(text, `"session_id"`) || strings.Contains(text, `"last_error"`) {
+		t.Fatalf("inactive status serialized cleared metadata: %s", text)
+	}
+	if !strings.Contains(text, `"allowed_numbers":[]`) {
+		t.Fatalf("inactive status must retain a stable empty allowed_numbers array: %s", text)
+	}
+}
+
 func TestVoiceVerificationWindowIsSingleUseAndScoped(t *testing.T) {
 	instance := &app{}
-	window := instance.armVoiceVerification(5*time.Minute, []string{"18742589885"})
+	window := instance.armVoiceVerification(5*time.Minute, []string{"10000000000"})
 	if !window.Active || len(window.AllowedNumbers) != 1 {
 		t.Fatalf("unexpected window: %+v", window)
 	}
-	if !instance.voiceVerificationNumberAllowed("18742589885") {
+	if !instance.voiceVerificationNumberAllowed("10000000000") {
 		t.Fatal("allowed number was rejected")
 	}
-	if instance.voiceVerificationNumberAllowed("13800138000") {
+	if instance.voiceVerificationNumberAllowed("10000000001") {
 		t.Fatal("unlisted number was allowed")
 	}
 	instance.updateVoiceVerification(func(current *voiceVerificationWindow) {
@@ -265,10 +372,10 @@ func TestVoiceVerificationPrewarmsModuleRouteBeforeAnswerAndConsumesOnce(t *test
 			return nil
 		},
 	}
-	current := &testIncomingCall{number: "18742589885", sessionID: "incoming-session"}
+	current := &testIncomingCall{number: "10000000000", sessionID: "incoming-session"}
 	current.install(instance)
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
-	call := callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"}
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+	call := callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1}
 	if !instance.handleVoiceVerificationIncoming(call) {
 		t.Fatal("authorized incoming call was not handled")
 	}
@@ -314,10 +421,10 @@ func TestVoiceVerificationInvalidatesBlockedPrewarm(t *testing.T) {
 		{
 			name: "rearm",
 			invalidate: func(instance *app, _ *testIncomingCall) {
-				instance.armVoiceVerification(time.Minute, []string{"13800138000"})
+				instance.armVoiceVerification(time.Minute, []string{"10000000001"})
 			},
 			assert: func(t *testing.T, window voiceVerificationWindow) {
-				if !window.Active || window.Consumed || window.Answered || len(window.AllowedNumbers) != 1 || window.AllowedNumbers[0] != "13800138000" || window.LastError != "" {
+				if !window.Active || window.Consumed || window.Answered || len(window.AllowedNumbers) != 1 || window.AllowedNumbers[0] != "10000000001" || window.LastError != "" {
 					t.Fatalf("stale attempt polluted replacement window: %+v", window)
 				}
 			},
@@ -339,7 +446,7 @@ func TestVoiceVerificationInvalidatesBlockedPrewarm(t *testing.T) {
 		{
 			name: "incoming replacement",
 			invalidate: func(_ *app, current *testIncomingCall) {
-				current.replace("13800138000", "replacement-session")
+				current.replace("10000000001", "replacement-session")
 			},
 			assert: func(t *testing.T, window voiceVerificationWindow) {
 				if window.Active || !window.Consumed || window.Answered || window.AudioAuthorized || window.LastError == "" {
@@ -369,12 +476,12 @@ func TestVoiceVerificationInvalidatesBlockedPrewarm(t *testing.T) {
 					return nil
 				},
 			}
-			current := &testIncomingCall{number: "18742589885", sessionID: "incoming-session"}
+			current := &testIncomingCall{number: "10000000000", sessionID: "incoming-session"}
 			current.install(instance)
-			instance.armVoiceVerification(time.Minute, []string{"18742589885"})
+			instance.armVoiceVerification(time.Minute, []string{"10000000000"})
 			done := make(chan struct{})
 			go func() {
-				instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"})
+				instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1})
 				close(done)
 			}()
 			<-started
@@ -417,12 +524,12 @@ func TestVoiceVerificationRejectsReplacedIncomingCallIDAfterPrewarm(t *testing.T
 			return nil
 		},
 	}
-	current := &testIncomingCall{number: "18742589885", sessionID: "incoming-session", callID: 7}
+	current := &testIncomingCall{number: "10000000000", sessionID: "incoming-session", callID: 7}
 	current.install(instance)
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
 	done := make(chan struct{})
 	go func() {
-		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session", moduleCallID: 7})
+		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 7})
 		close(done)
 	}()
 	<-started
@@ -458,8 +565,8 @@ func TestVoiceVerificationPrewarmFailureConsumesWindowAndRollsBackOnce(t *testin
 			return nil
 		},
 	}
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
-	call := callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"}
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+	call := callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1}
 	instance.handleVoiceVerificationIncoming(call)
 	instance.handleVoiceVerificationIncoming(call)
 	window := instance.voiceVerificationSnapshot()
@@ -492,10 +599,10 @@ func TestVoiceVerificationRollsBackStarterThatFinishesAfterTeardown(t *testing.T
 			return nil
 		},
 	}
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
 	done := make(chan struct{})
 	go func() {
-		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"})
+		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1})
 		close(done)
 	}()
 	<-started
@@ -538,19 +645,19 @@ func TestVoiceVerificationRearmWaitsForStalePrewarmOwnership(t *testing.T) {
 			return nil
 		},
 	}
-	current := &testIncomingCall{number: "18742589885", sessionID: "old-session"}
+	current := &testIncomingCall{number: "10000000000", sessionID: "old-session"}
 	current.install(instance)
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
 	oldDone := make(chan struct{})
 	go func() {
-		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "old-session", moduleCallID: 1})
+		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "old-session", moduleCallID: 1})
 		close(oldDone)
 	}()
 	<-firstStarted
 
-	current.replace("13800138000", "new-session")
-	instance.armVoiceVerification(time.Minute, []string{"13800138000"})
-	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "13800138000", SessionID: "new-session", moduleCallID: 1})
+	current.replace("10000000001", "new-session")
+	instance.armVoiceVerification(time.Minute, []string{"10000000001"})
+	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000001", SessionID: "new-session", moduleCallID: 1})
 	window := instance.voiceVerificationSnapshot()
 	if !window.Active || window.Consumed || window.LastError != "" || starts.Load() != 1 || answers.Load() != 0 {
 		t.Fatalf("replacement window was polluted while stale prewarm owned transition: window=%+v starts=%d answers=%d", window, starts.Load(), answers.Load())
@@ -562,7 +669,7 @@ func TestVoiceVerificationRearmWaitsForStalePrewarmOwnership(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stale prewarm did not release ownership")
 	}
-	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "13800138000", SessionID: "new-session", moduleCallID: 1})
+	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000001", SessionID: "new-session", moduleCallID: 1})
 	window = instance.voiceVerificationSnapshot()
 	if window.Active || !window.Answered || !window.Consumed || starts.Load() != 2 || stops.Load() != 1 || answers.Load() != 1 {
 		t.Fatalf("replacement did not proceed after stale cleanup: window=%+v starts=%d stops=%d answers=%d", window, starts.Load(), stops.Load(), answers.Load())
@@ -588,10 +695,10 @@ func TestVoiceVerificationAnswerFailureConsumesWindowAndStopsOwnedRouteOnce(t *t
 			return errors.New("ATA failed")
 		},
 	}
-	current := &testIncomingCall{number: "18742589885", sessionID: "incoming-session"}
+	current := &testIncomingCall{number: "10000000000", sessionID: "incoming-session"}
 	current.install(instance)
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
-	call := callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"}
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+	call := callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1}
 	instance.handleVoiceVerificationIncoming(call)
 	instance.handleVoiceVerificationIncoming(call)
 	window := instance.voiceVerificationSnapshot()
@@ -614,10 +721,10 @@ func TestVoiceVerificationAnswerFailureDoesNotStopPreexistingRoute(t *testing.T)
 		voiceVerificationAnswer: func() error { return errors.New("ATA failed") },
 	}
 	instance.moduleVoiceRoute = true
-	current := &testIncomingCall{number: "18742589885", sessionID: "incoming-session"}
+	current := &testIncomingCall{number: "10000000000", sessionID: "incoming-session"}
 	current.install(instance)
-	instance.armVoiceVerification(time.Minute, []string{"18742589885"})
-	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "18742589885", SessionID: "incoming-session"})
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+	instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Incoming: true, Number: "10000000000", SessionID: "incoming-session", moduleCallID: 1})
 	if stops.Load() != 0 {
 		t.Fatalf("preexisting route was stopped %d times", stops.Load())
 	}
@@ -631,11 +738,74 @@ func TestVoiceVerificationAnswerFailureDoesNotStopPreexistingRoute(t *testing.T)
 
 func TestVoiceVerificationWindowExpires(t *testing.T) {
 	instance := &app{}
-	instance.armVoiceVerification(30*time.Second, []string{"18742589885"})
+	instance.armVoiceVerification(30*time.Second, []string{"10000000000"})
 	instance.updateVoiceVerification(func(current *voiceVerificationWindow) {
 		current.ExpiresAt = time.Now().Add(-time.Second)
 	})
 	if got := instance.voiceVerificationSnapshot(); got.Active {
 		t.Fatalf("expired window remained active: %+v", got)
+	}
+}
+
+func TestVoiceVerificationDefersAllTransientPrewarmStates(t *testing.T) {
+	for _, state := range []struct {
+		name string
+		set  func(*app)
+	}{
+		{"start", func(a *app) { a.moduleVoiceRouteStarting = true }},
+		{"recovery", func(a *app) { a.moduleVoiceRecoveryInProgress = true }},
+		{"teardown", func(a *app) { a.moduleVoiceTeardownInProgress = true }},
+	} {
+		t.Run(state.name, func(t *testing.T) {
+			instance := &app{moduleVoiceAutoStart: true}
+			instance.moduleVoiceMu.Lock()
+			state.set(instance)
+			instance.moduleVoiceMu.Unlock()
+			instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+			instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Number: "10000000000", SessionID: "s"})
+			window := instance.voiceVerificationSnapshot()
+			if !window.Active || window.Consumed || window.LastError != "" {
+				t.Fatalf("transient state consumed window: %+v", window)
+			}
+		})
+	}
+}
+
+func TestVoiceVerificationMatchesNormalizedNumbersAndRejectsUnknownCallID(t *testing.T) {
+	instance := &app{}
+	instance.armVoiceVerification(time.Minute, []string{"+86 187-4258-9885"})
+	if !instance.voiceVerificationNumberAllowed("+86 (187) 4258 9885") {
+		t.Fatal("normalized allowed number rejected")
+	}
+	attempt, _, handled := instance.reserveVoiceVerificationAttempt(callStateInfo{State: "incoming", Number: "+86 (187) 4258 9885", SessionID: "s", moduleCallID: 0})
+	if !handled || attempt.callID != 0 {
+		t.Fatalf("unexpected attempt: %+v handled=%v", attempt, handled)
+	}
+	instance.voiceVerificationMu.Lock()
+	valid := instance.voiceVerificationAttemptValidLocked(attempt, callStateInfo{State: "incoming", Number: "8610000000000", SessionID: "s", moduleCallID: 7})
+	instance.voiceVerificationMu.Unlock()
+	if valid {
+		t.Fatal("callID=0 was treated as a wildcard")
+	}
+}
+
+func TestVoiceVerificationReportsRollbackFailureOnIdentityChange(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	instance := &app{moduleVoiceAutoStart: true, moduleVoiceRouteStart: func(string) error { close(started); <-release; return nil }, moduleVoiceRouteStop: func(string) error { return errors.New("rollback failed") }}
+	current := &testIncomingCall{number: "10000000000", sessionID: "s"}
+	current.install(instance)
+	instance.armVoiceVerification(time.Minute, []string{"10000000000"})
+	done := make(chan struct{})
+	go func() {
+		instance.handleVoiceVerificationIncoming(callStateInfo{State: "incoming", Number: "10000000000", SessionID: "s"})
+		close(done)
+	}()
+	<-started
+	current.replace("10000000001", "replacement")
+	close(release)
+	<-done
+	if got := instance.voiceVerificationSnapshot().LastError; !strings.Contains(got, "rollback failed") {
+		t.Fatalf("rollback error was swallowed: %q", got)
 	}
 }

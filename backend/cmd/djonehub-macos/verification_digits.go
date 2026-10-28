@@ -20,7 +20,9 @@ var spokenDigit = map[rune]rune{
 
 func extractVerificationDigits(text string) string {
 	lower := strings.ToLower(text)
-	if !strings.Contains(lower, "验证码") && !strings.Contains(lower, "code") {
+	verificationKeyword := strings.Contains(lower, "验证码") || strings.Contains(lower, "见证码") ||
+		strings.Contains(lower, "见证马") || strings.Contains(lower, "code")
+	if !verificationKeyword {
 		return ""
 	}
 

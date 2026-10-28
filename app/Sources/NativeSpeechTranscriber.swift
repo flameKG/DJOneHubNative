@@ -5,6 +5,18 @@ import Speech
 /// macOS 27+ 原生实时转录适配器。
 /// 输入固定为 QDC507 的 PCM16LE / 8000Hz / mono，不保存原始音频。
 @available(macOS 27.0, *)
+enum NativeSpeechTranscriberErrorPolicy {
+    static func report(
+        _ error: Error,
+        onResult: (String, Bool) -> Void,
+        onError: (String) -> Void
+    ) {
+        _ = onResult
+        onError(error.localizedDescription)
+    }
+}
+
+@available(macOS 27.0, *)
 final class NativeSpeechTranscriber {
     struct Diagnostics: Sendable {
         let requestedLocale: String
@@ -32,9 +44,11 @@ final class NativeSpeechTranscriber {
     }
 
     typealias ResultHandler = @Sendable (_ text: String, _ isFinal: Bool) -> Void
+    typealias ErrorHandler = @Sendable (_ message: String) -> Void
 
     private let locale: Locale
     private let onResult: ResultHandler
+    private let onError: ErrorHandler
     private let inputFormat = AVAudioFormat(standardFormatWithSampleRate: 8_000, channels: 1)!
     private var continuation: AsyncStream<AnalyzerInput>.Continuation?
     private var converter: AnalyzerInputConverter?
@@ -44,9 +58,14 @@ final class NativeSpeechTranscriber {
     private var started = false
     private let inputQueue = DispatchQueue(label: "com.djonehub.native-speech.input", qos: .userInitiated)
 
-    init(localeIdentifier: String = "zh-CN", onResult: @escaping ResultHandler) {
+    init(
+        localeIdentifier: String = "zh-CN",
+        onResult: @escaping ResultHandler,
+        onError: @escaping ErrorHandler = { _ in }
+    ) {
         self.locale = Locale(identifier: localeIdentifier)
         self.onResult = onResult
+        self.onError = onError
     }
 
     static func diagnostics(localeIdentifier: String = "zh-CN") async -> Diagnostics {
@@ -99,7 +118,10 @@ final class NativeSpeechTranscriber {
             } catch is CancellationError {
                 // 正常停止不作为错误上报。
             } catch {
-                self.onResult("[native-asr-error] \(error.localizedDescription)", true)
+                NativeSpeechTranscriberErrorPolicy.report(
+                    error,
+                    onResult: self.onResult,
+                    onError: self.onError)
             }
         }
     }
@@ -129,7 +151,10 @@ final class NativeSpeechTranscriber {
                 continuation?.yield(input)
             }
         } catch {
-            onResult("[native-asr-input-error] \(error.localizedDescription)", true)
+            NativeSpeechTranscriberErrorPolicy.report(
+                error,
+                onResult: onResult,
+                onError: onError)
         }
     }
 
