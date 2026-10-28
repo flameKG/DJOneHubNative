@@ -449,7 +449,7 @@ struct HomeView: View {
         .alert("通知权限被拒绝", isPresented: $showNotifyDeniedAlert) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("请在 系统设置 → 通知 中允许 DJOneHub 的通知后再开启。")
+            Text("请在 系统设置 → 通知 中允许 Flame DJ Hub 的通知后再开启。")
         }
     }
 

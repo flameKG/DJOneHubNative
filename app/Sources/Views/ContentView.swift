@@ -57,7 +57,7 @@ struct ContentView: View {
             }
             .listStyle(.sidebar)
             .navigationSplitViewColumnWidth(min: 150, ideal: 170)
-            .navigationTitle("DJOneHub")
+            .navigationTitle("Flame DJ Hub")
         } detail: {
             switch selection ?? .home {
             case .home:
