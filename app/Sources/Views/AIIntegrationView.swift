@@ -15,6 +15,8 @@ struct AIIntegrationView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            PermissionCenterSection()
+
             Section("命令行工具") {
                 LabeledContent("安装状态") {
                     Label(installationTitle, systemImage: installationIcon)
@@ -165,7 +167,7 @@ struct AIIntegrationView: View {
         .formStyle(.grouped)
         .frame(maxWidth: 640)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .navigationTitle("AI 与 CLI")
+        .navigationTitle("权限与 CLI")
         .onAppear {
             manager.refreshInstallationState()
         }

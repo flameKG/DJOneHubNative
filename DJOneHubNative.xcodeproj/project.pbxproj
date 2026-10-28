@@ -38,6 +38,9 @@
 		C856F18A2C9A8B48080E46E6 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = C84FC7D3D21A21CC374D0541 /* Models.swift */; };
 		D1A600000000000000000002 /* RuntimeDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A600000000000000000001 /* RuntimeDiagnostics.swift */; };
 		D1A600000000000000000004 /* RuntimeDiagnosticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A600000000000000000003 /* RuntimeDiagnosticsView.swift */; };
+		D1A700000000000000000002 /* PermissionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000001 /* PermissionCenter.swift */; };
+		D1A700000000000000000004 /* SystemPermissionCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000003 /* SystemPermissionCenter.swift */; };
+		D1A700000000000000000006 /* PermissionCenterView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A700000000000000000005 /* PermissionCenterView.swift */; };
 		CCDD69D5E523420BC2C5E3EE /* SMSStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5FE558AD4FEF1919375198D /* SMSStore.swift */; };
 		D17A5BEAA6B91E0CF4345CB7 /* AutoLaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0C9E1750A28B9B4C02C072B /* AutoLaunch.swift */; };
 		D3238E4E67EDAA6BCCA830B5 /* RoutingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A480439FB5558538B8B6E0 /* RoutingStore.swift */; };
@@ -80,6 +83,9 @@
 		C8D12A59DEC449800F89AD9B /* AttentionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionStore.swift; sourceTree = "<group>"; };
 		D1A600000000000000000001 /* RuntimeDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeDiagnostics.swift; sourceTree = "<group>"; };
 		D1A600000000000000000003 /* RuntimeDiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeDiagnosticsView.swift; sourceTree = "<group>"; };
+		D1A700000000000000000001 /* PermissionCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionCenter.swift; sourceTree = "<group>"; };
+		D1A700000000000000000003 /* SystemPermissionCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemPermissionCenter.swift; sourceTree = "<group>"; };
+		D1A700000000000000000005 /* PermissionCenterView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissionCenterView.swift; sourceTree = "<group>"; };
 		DB45AD6AB93DBA1F357E5695 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DC11388FA67B835A55D6B961 /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		E6A07D7E5C03CF4CC05E28A3 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
@@ -139,8 +145,10 @@
 				F2E57514CD06B3BE5E853F33 /* IncomingCallCard.swift */,
 				2ADF4F5CB5DF476DA82A150E /* LocalBackendAuthentication.swift */,
 				C84FC7D3D21A21CC374D0541 /* Models.swift */,
+				D1A700000000000000000001 /* PermissionCenter.swift */,
 				7B63FD8D7D1B1D51D06D23BD /* Ringtone.swift */,
 				D1A600000000000000000001 /* RuntimeDiagnostics.swift */,
+				D1A700000000000000000003 /* SystemPermissionCenter.swift */,
 				AA4E2ADFBEE34D33B207BBA4 /* RoutingModels.swift */,
 				C1A480439FB5558538B8B6E0 /* RoutingStore.swift */,
 				C5FE558AD4FEF1919375198D /* SMSStore.swift */,
@@ -178,6 +186,7 @@
 				FCF20520A20CFDC1ACF07AF4 /* DiagnosticsView.swift */,
 				2726B5DD5C2CB2DB372DDF46 /* ESIMView.swift */,
 				DC11388FA67B835A55D6B961 /* HomeView.swift */,
+				D1A700000000000000000005 /* PermissionCenterView.swift */,
 				D1A600000000000000000003 /* RuntimeDiagnosticsView.swift */,
 				1FE8CEA7FD366A18D63D79BB /* SMSView.swift */,
 				BBEB127E5FB81A8F005E5AD4 /* TrafficRoutingView.swift */,
@@ -320,8 +329,11 @@
 				19688E1CE9B8EC8D2F96AC37 /* IncomingCallCard.swift in Sources */,
 				0E85818D4C6D39944E1FF21C /* LocalBackendAuthentication.swift in Sources */,
 				C856F18A2C9A8B48080E46E6 /* Models.swift in Sources */,
+				D1A700000000000000000002 /* PermissionCenter.swift in Sources */,
 				D1A600000000000000000002 /* RuntimeDiagnostics.swift in Sources */,
 				D1A600000000000000000004 /* RuntimeDiagnosticsView.swift in Sources */,
+				D1A700000000000000000004 /* SystemPermissionCenter.swift in Sources */,
+				D1A700000000000000000006 /* PermissionCenterView.swift in Sources */,
 				A122D9632A78D37E4E440DBE /* Ringtone.swift in Sources */,
 				3F6C769CD04308BE9CA17D4E /* RoutingModels.swift in Sources */,
 				D3238E4E67EDAA6BCCA830B5 /* RoutingStore.swift in Sources */,

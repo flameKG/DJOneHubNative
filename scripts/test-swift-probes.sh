@@ -39,4 +39,10 @@ swiftc -parse-as-library \
   -o "$PROBE_ROOT/runtime-diagnostics"
 "$PROBE_ROOT/runtime-diagnostics"
 
-log "Swift 策略、诊断与迁移探针全部通过"
+swiftc -parse-as-library \
+  app/Sources/PermissionCenter.swift \
+  app/Tests/PermissionCenterProbe/main.swift \
+  -o "$PROBE_ROOT/permission-center"
+"$PROBE_ROOT/permission-center"
+
+log "Swift 策略、权限、诊断与迁移探针全部通过"
