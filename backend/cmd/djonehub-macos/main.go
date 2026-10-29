@@ -2094,7 +2094,18 @@ func (a *app) networkDiagnostic(w http.ResponseWriter, _ *http.Request) {
 		Raw:           raw,
 		Errors:        errs,
 	}
-	diag.USBNetworkPresent = hasLikelyUSBNetworkInterface(diag.MacInterfaces)
+	moduleProduct := ""
+	if diag.USBDevice != nil {
+		moduleProduct = strings.TrimSpace(diag.USBDevice.Product)
+	}
+	if moduleProduct != "" {
+		services, err := macNetworkServiceOrder(moduleProduct)
+		if err != nil {
+			errs["network_services"] = err.Error()
+		} else {
+			diag.USBNetworkPresent = hasModuleNetworkInterface(diag.MacInterfaces, services)
+		}
+	}
 
 	commands := map[string]string{
 		"usbnet":  `AT+QCFG="usbnet"`,
@@ -3094,13 +3105,9 @@ func classifyMacInterfaceName(name string) string {
 	}
 }
 
-func hasLikelyUSBNetworkInterface(interfaces []macNetInterface) bool {
-	for _, item := range interfaces {
-		if item.Kind == "ethernet" && item.Name != "en0" && item.Status == "active" {
-			return true
-		}
-	}
-	return false
+func hasModuleNetworkInterface(interfaces []macNetInterface, services []networkService) bool {
+	name, active := selectModuleTrafficInterface(interfaces, services)
+	return name != "" && active
 }
 
 // selectModuleTrafficInterface 只返回已被标记为 4G 模块的网卡。

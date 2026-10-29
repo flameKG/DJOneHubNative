@@ -320,6 +320,22 @@ struct TrafficSnapshot: Decodable {
     }
 }
 
+enum NetworkTrafficPresentation: Equatable {
+    case available
+    case cellularDataDisabled
+    case unavailable
+}
+
+func networkTrafficPresentation(
+    _ traffic: TrafficSnapshot,
+    usbnetEnabled: Bool
+) -> NetworkTrafficPresentation {
+    if traffic.available {
+        return .available
+    }
+    return usbnetEnabled ? .unavailable : .cellularDataDisabled
+}
+
 /// POST /api/network/check-4g、check-proxy
 struct CheckResult: Decodable {
     let ok: Bool

@@ -181,8 +181,39 @@ struct StructuredDiagnosticsProbe {
 
         testSecurePersistence(events: Array(boundary.events.suffix(2)), now: baseTime.addingTimeInterval(300))
         testStoreStateConsistency(baseTime: baseTime)
+        testNetworkTrafficPolicy()
 
         print("PASS bounded privacy-safe structured diagnostics")
+    }
+
+    private static func testNetworkTrafficPolicy() {
+        let unavailable = TrafficSnapshot(
+            available: false,
+            interface: nil,
+            rxBytes: nil,
+            txBytes: nil,
+            sessionRX: nil,
+            sessionTX: nil,
+            sessionTotal: nil,
+            sampledAtMS: nil,
+            error: "未识别到 4G 模块网卡")
+        expect(networkTrafficPresentation(unavailable, usbnetEnabled: false) == .cellularDataDisabled,
+               "usbnet=0 must be presented as intentionally disabled, not a recovery error")
+        expect(networkTrafficPresentation(unavailable, usbnetEnabled: true) == .unavailable,
+               "usbnet=1 with no module interface must remain unavailable")
+
+        let available = TrafficSnapshot(
+            available: true,
+            interface: "en8",
+            rxBytes: 1,
+            txBytes: 2,
+            sessionRX: 1,
+            sessionTX: 2,
+            sessionTotal: 3,
+            sampledAtMS: 4,
+            error: nil)
+        expect(networkTrafficPresentation(available, usbnetEnabled: false) == .available,
+               "a real available sample must remain available")
     }
 
     @MainActor

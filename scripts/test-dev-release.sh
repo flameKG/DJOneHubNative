@@ -419,6 +419,69 @@ assert_incremental_outer_signing_uses_stable_identity() {
   grep -Fq '/usr/bin/codesign --force --sign "${EXPANDED_CODE_SIGN_IDENTITY}" --timestamp=none "${APP_BUNDLE}"' "$SCRIPT_DIR/../project.yml"
 }
 
+assert_libusb_dependency_rewrite_is_fail_closed() {
+  local root helper daemon marker otool install
+  root="$(mktemp -d "${TMPDIR:-/tmp}/flame libusb rewrite.XXXXXX")" || return 1
+  helper="$SCRIPT_DIR/rewrite-libusb-dependency.sh"
+  daemon="$root/Flame DJ Hub/djonehubd"
+  marker="$root/rewritten"
+  otool="$root/fake-otool"
+  install="$root/fake-install-name-tool"
+  mkdir -p "$(dirname "$daemon")"
+  : >"$daemon"
+
+  cat >"$otool" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "${TEST_OTOOL_MODE:-success}" in
+  fail) exit 41 ;;
+  multiple)
+    printf '%s:\n' "$2"
+    printf '\t/first/libusb-1.0.0.dylib (compatibility version 7.0.0, current version 7.0.0)\n'
+    printf '\t/second/libusb-1.0.0.dylib (compatibility version 7.0.0, current version 7.0.0)\n'
+    ;;
+  *)
+    printf '%s:\n' "$2"
+    printf '\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1.0.0)\n'
+    if [ -f "$TEST_REWRITE_MARKER" ]; then
+      printf '\t@loader_path/libusb-1.0.0.dylib (compatibility version 7.0.0, current version 7.0.0)\n'
+    else
+      printf '\t/Users/macmini/Library/Application Support/Flame DJ Hub/libusb-1.0.0.dylib (compatibility version 7.0.0, current version 7.0.0)\n'
+    fi
+    ;;
+esac
+SH
+  cat >"$install" <<'SH'
+#!/usr/bin/env bash
+set -eu
+[ "${TEST_INSTALL_MODE:-success}" != fail ] || exit 42
+[ "$1" = -change ]
+[ "$2" = '/Users/macmini/Library/Application Support/Flame DJ Hub/libusb-1.0.0.dylib' ]
+[ "$3" = '@loader_path/libusb-1.0.0.dylib' ]
+[ "$4" = "$TEST_DAEMON" ]
+: >"$TEST_REWRITE_MARKER"
+SH
+  chmod +x "$otool" "$install"
+
+  TEST_REWRITE_MARKER="$marker" TEST_DAEMON="$daemon" OTOOL_BIN="$otool" INSTALL_NAME_TOOL_BIN="$install" \
+    "$helper" "$daemon" || { rm -rf "$root"; return 1; }
+  [ -f "$marker" ] || { rm -rf "$root"; return 1; }
+  rm -f "$marker"
+
+  if TEST_OTOOL_MODE=fail TEST_REWRITE_MARKER="$marker" TEST_DAEMON="$daemon" OTOOL_BIN="$otool" INSTALL_NAME_TOOL_BIN="$install" \
+    "$helper" "$daemon" >/dev/null 2>&1; then rm -rf "$root"; return 1; fi
+  if TEST_OTOOL_MODE=multiple TEST_REWRITE_MARKER="$marker" TEST_DAEMON="$daemon" OTOOL_BIN="$otool" INSTALL_NAME_TOOL_BIN="$install" \
+    "$helper" "$daemon" >/dev/null 2>&1; then rm -rf "$root"; return 1; fi
+  if TEST_INSTALL_MODE=fail TEST_REWRITE_MARKER="$marker" TEST_DAEMON="$daemon" OTOOL_BIN="$otool" INSTALL_NAME_TOOL_BIN="$install" \
+    "$helper" "$daemon" >/dev/null 2>&1; then rm -rf "$root"; return 1; fi
+
+  grep -Fq 'rewrite-libusb-dependency.sh" "${BACKEND_DIR}/djonehubd"' "$SCRIPT_DIR/../project.yml" \
+    && ! grep -Fq 'install_name_tool -change "$old"' "$SCRIPT_DIR/../project.yml"
+  local result=$?
+  rm -rf "$root"
+  return "$result"
+}
+
 run_test 'identity is fixed and ignores environment overrides' assert_fixed_identity
 run_test 'latest rollback backup excludes failed and malformed names' assert_backup_selection
 run_test 'process matching requires exact executable path and UID' assert_exact_process_matching
@@ -439,6 +502,7 @@ run_test 'rollback refuses while release lock is held' assert_rollback_refuses_a
 run_test 'cleanup rm failure still restores and releases lock' assert_cleanup_rm_failure_still_restores_and_unlocks
 run_test 'cleanup log failure still restores and releases lock' assert_cleanup_log_failure_still_restores_and_unlocks
 run_test 'incremental outer signing uses the stable identity' assert_incremental_outer_signing_uses_stable_identity
+run_test 'libusb dependency rewrite is fail-closed' assert_libusb_dependency_rewrite_is_fail_closed
 
 printf '%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
