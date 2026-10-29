@@ -56,6 +56,7 @@ type agentAudioState struct {
 	ASRRunning            bool             `json:"asr_running"`
 	ASRError              string           `json:"asr_error,omitempty"`
 	TTSAvailable          bool             `json:"tts_available"`
+	TTSCheckedAt          time.Time        `json:"-"`
 	Format                agentAudioFormat `json:"format"`
 	Error                 string           `json:"error,omitempty"`
 	Transcript            string           `json:"transcript,omitempty"`
@@ -142,7 +143,9 @@ func (a *app) agentAudioSnapshot() agentAudioState {
 	state.PCMTransportAvailable = state.Compiled && state.TransportReady && strings.TrimSpace(state.SocketPath) != ""
 	state.VoiceAgentAvailable = state.PCMTransportAvailable && state.ClientConnected && state.ModuleIOReady
 	state.ASRAvailable = state.ASRCompiled && state.ASRRunning && strings.TrimSpace(state.ASRError) == ""
-	state.TTSAvailable = false
+	if state.TTSAvailable && (state.TTSCheckedAt.IsZero() || time.Since(state.TTSCheckedAt) > ttsAvailabilityTTL) {
+		state.TTSAvailable = false
+	}
 	if !state.VoiceAgentAvailable {
 		state.Active = false
 	}

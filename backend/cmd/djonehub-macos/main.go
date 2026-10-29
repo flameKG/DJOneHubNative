@@ -121,6 +121,10 @@ type app struct {
 	agentPCMSessionID           string
 	agentPCMGeneration          uint64
 	agentPCMRunner              agentPCMRunnerFunc
+	ttsProbeMu                  sync.Mutex
+	ttsProbeInFlight            bool
+	ttsProbeLastAt              time.Time
+	ttsProvider                 ttsProvider
 
 	// 一次性语音验证码接听窗口：仅接听用户明确允许的号码。
 	voiceVerificationMu         sync.Mutex
@@ -421,6 +425,7 @@ func (a *app) installESIMManager(manager *esim.Manager, switchAllowed bool) bool
 
 func serve(instance *app, listen string) {
 	defer instance.cancelCallTones()
+	instance.configureTTSFromEnvironment()
 	if instance.routing != nil {
 		defer instance.routing.Close()
 	}
@@ -849,6 +854,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("PUT /api/agent/audio/transport", a.agentAudioTransport)
 	mux.HandleFunc("GET /api/agent/audio/status", a.agentAudioStatus)
 	mux.HandleFunc("PUT /api/agent/audio/transcript", a.agentAudioTranscript)
+	mux.HandleFunc("POST /api/agent/audio/tts/probe", a.agentTTSProbe)
 	mux.HandleFunc("POST /api/agent/audio/start", a.agentAudioStart)
 	mux.HandleFunc("POST /api/agent/audio/stop", a.agentAudioStop)
 	mux.HandleFunc("GET /api/health", a.health)

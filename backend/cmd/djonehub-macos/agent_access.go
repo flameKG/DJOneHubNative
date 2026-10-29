@@ -309,7 +309,7 @@ func (a *app) agentCapabilities(w http.ResponseWriter, r *http.Request) {
 			"agent_pcm_transport_available": audio.PCMTransportAvailable,
 			"voice_agent_available":         audio.VoiceAgentAvailable,
 			"asr_available":                 audio.ASRAvailable,
-			"tts_available":                 false,
+			"tts_available":                 audio.TTSAvailable,
 		},
 	})
 }
