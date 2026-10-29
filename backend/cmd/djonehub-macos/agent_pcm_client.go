@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -17,25 +18,34 @@ const (
 	agentPCMNonceBytes  = 16
 	agentPCMFrameBytes  = 320
 
-	agentPCMHello  = byte(1)
-	agentPCMAck    = byte(2)
-	agentPCMModule = byte(4)
-	agentPCMStop   = byte(5)
-	agentPCMError  = byte(6)
+	agentPCMHello    = byte(1)
+	agentPCMAck      = byte(2)
+	agentPCMDownlink = byte(3)
+	agentPCMModule   = byte(4)
+	agentPCMStop     = byte(5)
+	agentPCMError    = byte(6)
 )
 
 // runAgentPCMClient connects the backend to the native App's owner-only PCM
 // socket. The native App sends module-to-Mac PCM as type-4 frames.
 func runAgentPCMClient(ctx context.Context, socketPath string, onModulePCM func([]byte)) error {
+	return runAgentPCMClientWithDownlink(ctx, socketPath, onModulePCM, nil)
+}
+
+// runAgentPCMClientWithDownlink keeps the authenticated PCM socket bidirectional.
+// downlink is a bounded, cancellation-safe source of 320-byte PCM frames.
+func runAgentPCMClientWithDownlink(ctx context.Context, socketPath string, onModulePCM func([]byte), downlink <-chan []byte) error {
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
 	dialer := net.Dialer{Timeout: 3 * time.Second}
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	conn, err := dialer.DialContext(runCtx, "unix", socketPath)
 	if err != nil {
 		return fmt.Errorf("connect Agent PCM: %w", err)
 	}
 	watchDone := make(chan struct{})
 	go func() {
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			_ = conn.Close()
 		case <-watchDone:
 		}
@@ -43,8 +53,9 @@ func runAgentPCMClient(ctx context.Context, socketPath string, onModulePCM func(
 	defer close(watchDone)
 	defer conn.Close()
 
+	writeMu := sync.Mutex{}
 	zeroNonce := make([]byte, agentPCMNonceBytes)
-	if err := writeAgentPCMFrame(conn, agentPCMHello, 0, zeroNonce, nil); err != nil {
+	if err := writeAgentPCMFrameLocked(&writeMu, conn, agentPCMHello, 0, zeroNonce, nil); err != nil {
 		return fmt.Errorf("send Agent PCM hello: %w", err)
 	}
 	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
@@ -61,10 +72,70 @@ func runAgentPCMClient(ctx context.Context, socketPath string, onModulePCM func(
 		return err
 	}
 
-	expectedSequence := uint32(1)
+	senderDone := make(chan struct{})
+	senderErr := make(chan error, 1)
+	if downlink != nil {
+		go func() {
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			defer close(senderDone)
+			var downlinkSequence uint32 = 1
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case <-ticker.C:
+					var pcm []byte
+					select {
+					case pcm = <-downlink:
+					case <-runCtx.Done():
+						return
+					default:
+						continue
+					}
+					if pcm == nil {
+						return
+					}
+					if len(pcm) != agentPCMFrameBytes {
+						select {
+						case senderErr <- errors.New("invalid Agent PCM downlink frame"):
+						default:
+						}
+						runCancel()
+						_ = conn.Close()
+						return
+					}
+					if err := writeAgentPCMFrameLocked(&writeMu, conn, agentPCMDownlink, downlinkSequence, nonce, pcm); err != nil {
+						select {
+						case senderErr <- fmt.Errorf("send Agent PCM downlink: %w", err):
+						default:
+						}
+						runCancel()
+						_ = conn.Close()
+						return
+					}
+					downlinkSequence++
+				}
+			}
+		}()
+	} else {
+		close(senderDone)
+	}
+	defer func() {
+		runCancel()
+		_ = conn.Close()
+		<-senderDone
+	}()
+
+	var expectedSequence uint32 = 1
 	for {
 		frameType, sequence, frameNonce, payload, err := readAgentPCMFrame(conn)
 		if err != nil {
+			select {
+			case senderError := <-senderErr:
+				return senderError
+			default:
+			}
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
@@ -103,6 +174,12 @@ func readAgentPCMFrame(reader io.Reader) (byte, uint32, []byte, []byte, error) {
 		return 0, 0, nil, nil, err
 	}
 	return header[5], binary.BigEndian.Uint32(header[8:12]), append([]byte(nil), header[16:32]...), payload, nil
+}
+
+func writeAgentPCMFrameLocked(mu *sync.Mutex, writer io.Writer, frameType byte, sequence uint32, nonce, payload []byte) error {
+	mu.Lock()
+	defer mu.Unlock()
+	return writeAgentPCMFrame(writer, frameType, sequence, nonce, payload)
 }
 
 func writeAgentPCMFrame(writer io.Writer, frameType byte, sequence uint32, nonce, payload []byte) error {

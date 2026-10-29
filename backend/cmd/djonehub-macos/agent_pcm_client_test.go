@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -44,6 +46,131 @@ func TestRunAgentPCMClientCancellationDuringHandshakeClosesPromptly(t *testing.T
 	case <-serverDone:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("handshake socket remained open")
+	}
+}
+
+func TestRunAgentPCMClientSendsDownlinkFrame(t *testing.T) {
+	socketPath := filepath.Join("/Users/macmini/.hermes/cache/scratch", "agent-pcm-downlink-test.sock")
+	_ = os.Remove(socketPath)
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	downlink := make([]byte, agentPCMFrameBytes)
+	downlink[0] = 0x34
+	downlink[1] = 0x12
+	serverFrame := make(chan []byte, 1)
+	serverErr := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		defer conn.Close()
+		hello := make([]byte, agentPCMHeaderBytes)
+		if _, err := io.ReadFull(conn, hello); err != nil {
+			serverErr <- err
+			return
+		}
+		nonce := []byte("0123456789abcdef")
+		if _, err := conn.Write(testAgentPCMFrame(agentPCMAck, 0, nonce, nil)); err != nil {
+			serverErr <- err
+			return
+		}
+		frame, sequence, frameNonce, payload, err := readAgentPCMFrame(conn)
+		if err != nil {
+			serverErr <- err
+			return
+		}
+		if frame != agentPCMDownlink || sequence != 1 || !bytes.Equal(frameNonce, nonce) {
+			serverErr <- &testProtocolError{"unexpected downlink frame metadata"}
+			return
+		}
+		serverFrame <- payload
+		serverErr <- nil
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clientErr := make(chan error, 1)
+	downlinkFrames := make(chan []byte, 1)
+	downlinkFrames <- downlink
+	go func() {
+		clientErr <- runAgentPCMClientWithDownlink(ctx, socketPath, nil, downlinkFrames)
+	}()
+	select {
+	case payload := <-serverFrame:
+		if !bytes.Equal(payload, downlink) {
+			t.Fatalf("unexpected downlink payload")
+		}
+		cancel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for downlink frame")
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-clientErr; err != nil && err != context.Canceled && !errors.Is(err, io.EOF) {
+		t.Fatalf("client error: %v", err)
+	}
+}
+
+func TestRunAgentPCMClientStopsSenderWhenPeerSendsInvalidFrame(t *testing.T) {
+	socketPath := filepath.Join("/Users/macmini/.hermes/cache/scratch", "agent-pcm-invalid-frame-test.sock")
+	_ = os.Remove(socketPath)
+	defer os.Remove(socketPath)
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		hello := make([]byte, agentPCMHeaderBytes)
+		if _, readErr := io.ReadFull(conn, hello); readErr != nil {
+			return
+		}
+		nonce := []byte("0123456789abcdef")
+		if _, writeErr := conn.Write(testAgentPCMFrame(agentPCMAck, 0, nonce, nil)); writeErr != nil {
+			return
+		}
+		invalid := testAgentPCMFrame(agentPCMModule, 99, nonce, make([]byte, agentPCMFrameBytes))
+		if _, writeErr := conn.Write(invalid); writeErr != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	clientErr := make(chan error, 1)
+	downlinkFrames := make(chan []byte, 1)
+	go func() {
+		clientErr <- runAgentPCMClientWithDownlink(ctx, socketPath, nil, downlinkFrames)
+	}()
+	select {
+	case err := <-clientErr:
+		if err == nil || !strings.Contains(err.Error(), "invalid Agent PCM module frame") {
+			t.Fatalf("unexpected invalid-frame error: %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("client did not stop sender after invalid peer frame")
+	}
+	select {
+	case <-serverDone:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("server connection remained open after client failure")
 	}
 }
 
